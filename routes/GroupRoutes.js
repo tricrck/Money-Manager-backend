@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { check } = require('express-validator');
 const auth = require('../middleware/auth');
+const isAdmin = require('../middleware/isAdmin');
 const GroupController = require('../controllers/GroupController');
 
 // @route   POST /api/groups
