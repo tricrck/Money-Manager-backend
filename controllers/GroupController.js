@@ -696,10 +696,16 @@ class GroupController {
 
       // Find the new owner's member entry
       const newOwnerMemberIndex = group.members.findIndex(m => m.user.toString() === newOwnerId);
+      const oldOwnerMemberIndex = group.members.findIndex(m => m.user.toString() === req.user.id);
       
       // Update the new owner's role to admin if not already
       if (group.members[newOwnerMemberIndex].role !== 'admin') {
         group.members[newOwnerMemberIndex].role = 'admin';
+      }
+
+      // Demote the old owner to a member
+      if (group.members[oldOwnerMemberIndex].role === 'admin') {
+        group.members[oldOwnerMemberIndex].role = 'member';
       }
 
       // Add new owner to admins if not already there

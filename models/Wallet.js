@@ -70,5 +70,19 @@ WalletSchema.methods.updateBalance = async function(amount, type) {
   return this.balance;
 };
 
+// Add method to update currency
+WalletSchema.methods.updateCurrency = async function(newCurrency) {
+  const supportedCurrencies = ['KES', 'USD', 'EUR', 'GBP'];
+
+  if (!supportedCurrencies.includes(newCurrency.toUpperCase())) {
+    throw new Error(`Unsupported currency: ${newCurrency}`);
+  }
+
+  this.currency = newCurrency.toUpperCase();
+  await this.save();
+  return this.currency;
+};
+
+
 
 module.exports = mongoose.model('Wallet', WalletSchema);

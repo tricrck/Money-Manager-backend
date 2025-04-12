@@ -8,7 +8,7 @@ const isAdmin = async (req, res, next) => {
     try {
       // Assuming User model has been imported
       const user = await User.findById(req.user.id);
-      console.log(user);
+      
       if (!user) {
         return res.status(404).json({ message: 'User not found' });
       }

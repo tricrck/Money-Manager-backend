@@ -5,6 +5,7 @@ const base64 = require("base-64");
 const axios = require("axios");
 const express = require("express");
 const Payment = require("../models/Payment");
+const Wallet = require("../models/Wallet");
 const crypto = require('crypto');
 const MpesaTransaction = require("../models/MpesaTransaction");
 
@@ -149,7 +150,21 @@ exports.mpesaCallback = async (req, res) => {
       });
 
       await payment.save();
-      console.log("Mpesa Payment saved:", payment);
+      // 2. Find the wallet
+      const wallet = await Wallet.findOne({ user: transaction.userId });
+
+      // Create transaction record
+      const transactionRecord  = {
+        type: 'deposit',
+        amount: payment.amount,
+        paymentMethod: payment.paymentMethod,
+        paymentReference: payment.transactionId,
+        description: payment.description,
+      };
+
+      // Add transaction and update balance
+      wallet.transactions.push(transactionRecord);
+      await wallet.updateBalance(payment.amount, 'deposit');
     } else {
       // Failed case
       transaction.status = 'failed';
@@ -204,6 +219,22 @@ exports.checkTransactionStatus = async (req, res) => {
             });
             
             await payment.save();
+            // 2. Find the wallet
+            const wallet = await Wallet.findOne({ user: transaction.userId });
+
+            // Create transaction record
+            const transactionRecord = {
+              type: 'deposit',
+              amount: payment.amount,
+              paymentMethod: payment.paymentMethod,
+              paymentReference: payment.transactionId,
+              description: payment.description,
+            };
+
+            // Add transaction and update balance
+            wallet.transactions.push(transactionRecord);
+            await wallet.updateBalance(payment.amount, 'deposit');
+
           }
           
           await transaction.save();
@@ -356,7 +387,23 @@ exports.processStripePayment = async (req, res) => {
         });
 
         await payment.save();
-        console.log("Stripe Payment saved to database:", payment._id);
+        // 2. Find the wallet
+        const wallet = await Wallet.findOne({ user: userId });
+
+        // Create transaction record
+        const transactionRecord = {
+          type: 'deposit',
+          amount: payment.amount,
+          paymentMethod: payment.paymentMethod,
+          paymentReference: payment.transactionId,
+          description: payment.description,
+        };
+
+        // Add transaction and update balance
+        wallet.transactions.push(transactionRecord);
+        await wallet.updateBalance(payment.amount, 'deposit');
+        await wallet.updateCurrency(payment.currency);
+        
       } catch (dbError) {
         console.error("Error saving payment to database:", dbError.message);
         // Continue execution even if DB save fails

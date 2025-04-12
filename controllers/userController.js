@@ -37,11 +37,16 @@ exports.registerUser = async (req, res) => {
     // Return user without sensitive data
     const userResponse = user.toObject();
     delete userResponse.password;
+    delete userResponse.notificationPreferences;
 
-    res.status(201).json({ 
-      message: 'User registered successfully', 
-      user: userResponse 
-    });
+    // Generate JWT token
+    const token = jwt.sign(
+      { user: { id: user._id } }, 
+      process.env.JWT_SECRET, 
+      { expiresIn: '7d' }
+    );
+
+    res.json({ token, user: userResponse });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -64,6 +69,11 @@ exports.loginUser = async (req, res) => {
       return res.status(400).json({ message: 'Invalid password' });
     }
 
+    // Convert user to plain object and remove password and notificationPreferences
+    const userObject = user.toObject();
+    delete userObject.password;
+    delete userObject.notificationPreferences;
+
     // Generate JWT token
     const token = jwt.sign(
       { user: { id: user._id } }, 
@@ -71,7 +81,7 @@ exports.loginUser = async (req, res) => {
       { expiresIn: '7d' }
     );
 
-    res.json({ token });
+    res.json({ token, user: userObject });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -80,7 +90,7 @@ exports.loginUser = async (req, res) => {
 // Get all users
 exports.getAllUsers = async (req, res) => {
   try {
-    const users = await User.find().select('-password'); // Exclude passwords
+    const users = await User.find().select('-password'); 
     res.json(users);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -110,6 +120,8 @@ exports.getUser = async (req, res) => {
 exports.updateUser = async (req, res) => {
   try {
     const { id } = req.params;
+
+    console.log('Update user Data:', req.body);
     
     // Validate ID format
     if (!mongoose.Types.ObjectId.isValid(id)) {
