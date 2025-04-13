@@ -1,6 +1,4 @@
 const mongoose = require('mongoose');
-
-// Enum for request status
 const REQUEST_STATUS = {
   PENDING: 'pending',
   SUCCESS: 'success',

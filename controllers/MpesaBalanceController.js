@@ -1,10 +1,9 @@
 const axios = require('axios');
 const base64 = require('base-64');
-const MpesaBalanceRequest = require('../models/mpesaBalanceRequest');
 const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');
-const Payment = require("../models/Payment");
+const MpesaBalanceRequest = require('../models/MpesaBalanceRequest');
 
 class MpesaBalanceController {
   /**
