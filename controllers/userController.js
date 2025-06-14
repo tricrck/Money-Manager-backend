@@ -120,8 +120,6 @@ exports.getUser = async (req, res) => {
 exports.updateUser = async (req, res) => {
   try {
     const { id } = req.params;
-
-    console.log('Update user Data:', req.body);
     
     // Validate ID format
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -138,6 +136,7 @@ exports.updateUser = async (req, res) => {
       req.body, 
       { new: true, runValidators: true }
     ).select('-password');
+    console.log('Updated user:', user);
     
     if (!user) return res.status(404).json({ message: 'User not found' });
     

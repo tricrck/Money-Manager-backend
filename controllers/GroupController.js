@@ -24,7 +24,8 @@ class GroupController {
         description,
         admins,
         treasurer,
-        settings
+        settings,
+        privacy = 'private'
       } = req.body;
 
       // Check if group with same name already exists
@@ -38,6 +39,7 @@ class GroupController {
         name,
         groupType,
         description,
+        privacy,
         createdBy: req.user.id,
         members: [
           {
@@ -83,6 +85,57 @@ class GroupController {
   }
 
   /**
+   * Get all public groups (for discovery)
+   * @route GET /api/groups/public
+   * @access Private
+   */
+  async getPublicGroups(req, res) {
+    try {
+      const { page = 1, limit = 10, search } = req.query;
+      const skip = (page - 1) * limit;
+
+      // Build search query
+      let query = { privacy: 'public', isActive: true };
+      
+      if (search) {
+        query.$or = [
+          { name: { $regex: search, $options: 'i' } },
+          { description: { $regex: search, $options: 'i' } }
+        ];
+      }
+
+      const groups = await Group.find(query)
+        .populate('createdBy', 'name email username')
+        .populate('admins', 'name email username')
+        .select('name groupType description createdBy admins members privacy createdAt')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit));
+
+      const total = await Group.countDocuments(query);
+
+      // Add member count to each group
+      const groupsWithStats = groups.map(group => ({
+        ...group.toObject(),
+        memberCount: group.members.length
+      }));
+
+      res.json({
+        groups: groupsWithStats,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      });
+    } catch (error) {
+      console.error('Error fetching public groups:', error);
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+
+  /**
    * Get all groups
    * @route GET /api/groups
    * @access Private
@@ -123,6 +176,10 @@ class GroupController {
         .populate('createdBy', 'name email')
         .populate('admins', 'name email')
         .populate('treasurer', 'name email')
+        .populate('invitations.invitedUser', 'name email username')
+        .populate('invitations.invitedBy', 'name email username')
+        .populate('joinRequests.requestedBy', 'name email username')
+        .populate('joinRequests.reviewedBy', 'name email username')
         .sort({ createdAt: -1 });
 
       res.json(groups);
@@ -132,6 +189,326 @@ class GroupController {
     }
   }
 
+  /**
+   * Get user's pending invitations
+   * @route GET /api/groups/my-invitations
+   * @access Private
+   */
+  async getMyInvitations(req, res) {
+    try {
+      const userId = req.user.id;
+
+      const groups = await Group.find({
+        'invitations.invitedUser': userId,
+        'invitations.status': 'pending'
+      })
+        .populate('createdBy', 'name email username')
+        .populate('invitations.invitedBy', 'name email username')
+        .select('name groupType description createdBy invitations privacy createdAt');
+
+      // Extract only the relevant invitations
+      const invitations = [];
+      groups.forEach(group => {
+        const userInvitations = group.invitations.filter(inv => 
+          inv.invitedUser.toString() === userId && inv.status === 'pending'
+        );
+        userInvitations.forEach(invitation => {
+          invitations.push({
+            ...invitation.toObject(),
+            group: {
+              _id: group._id,
+              name: group.name,
+              groupType: group.groupType,
+              description: group.description,
+              createdBy: group.createdBy,
+              privacy: group.privacy,
+              createdAt: group.createdAt
+            }
+          });
+        });
+      });
+
+      res.json(invitations);
+    } catch (error) {
+      console.error('Error fetching user invitations:', error);
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+
+  /**
+   * Send invitation to user by username
+   * @route POST /api/groups/:id/invite
+   * @access Private (admin only)
+   */
+  async inviteUser(req, res) {
+    try {
+      const { username, role = 'member', message = '' } = req.body;
+
+      if (!username) {
+        return res.status(400).json({ message: 'Username is required' });
+      }
+
+      // Find the user by username
+      const invitedUser = await User.findOne({ username });
+      if (!invitedUser) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+
+      const group = await Group.findById(req.params.id);
+      if (!group) {
+        return res.status(404).json({ message: 'Group not found' });
+      }
+
+      // Check if current user is authorized to send invites
+      const isAdmin = group.admins.some(admin => admin.toString() === req.user.id);
+      if (!isAdmin && group.createdBy.toString() !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied. Only group admins can send invitations' });
+      }
+
+      // Send invitation
+      try {
+        const invitation = await group.sendInvitation(invitedUser._id, req.user.id, role, message);
+        
+        // Populate the invitation for response
+        await group.populate('invitations.invitedUser', 'name email username');
+        await group.populate('invitations.invitedBy', 'name email username');
+        
+        const populatedInvitation = group.invitations.find(inv => 
+          inv.invitedUser._id.toString() === invitedUser._id.toString() &&
+          inv.invitedBy._id.toString() === req.user.id &&
+          inv.status === 'pending'
+        );
+
+        res.status(201).json({
+          message: 'Invitation sent successfully',
+          invitation: populatedInvitation
+        });
+      } catch (inviteError) {
+        return res.status(400).json({ message: inviteError.message });
+      }
+    } catch (error) {
+      console.error('Error sending invitation:', error);
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+
+  /**
+   * Accept or decline invitation
+   * @route POST /api/groups/:id/invitations/:invitationId/respond
+   * @access Private
+   */
+  async respondToInvitation(req, res) {
+    try {
+      const { response } = req.body; // 'accept' or 'decline'
+      const { id: groupId, invitationId } = req.params;
+
+      if (!['accept', 'decline'].includes(response)) {
+        return res.status(400).json({ message: 'Invalid response. Must be "accept" or "decline"' });
+      }
+
+      const group = await Group.findById(groupId);
+      if (!group) {
+        return res.status(404).json({ message: 'Group not found' });
+      }
+
+      const invitation = group.invitations.id(invitationId);
+      if (!invitation) {
+        return res.status(404).json({ message: 'Invitation not found' });
+      }
+
+      // Check if the current user is the invited user
+      if (invitation.invitedUser.toString() !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied. You can only respond to your own invitations' });
+      }
+
+      if (invitation.status !== 'pending') {
+        return res.status(400).json({ message: 'Invitation has already been responded to' });
+      }
+
+      try {
+        let result;
+        if (response === 'accept') {
+          result = await group.acceptInvitation(req.user.id);
+        } else {
+          result = await group.declineInvitation(req.user.id);
+        }
+
+        res.json({
+          message: `Invitation ${response}ed successfully`,
+          invitation: result
+        });
+      } catch (responseError) {
+        return res.status(400).json({ message: responseError.message });
+      }
+    } catch (error) {
+      console.error('Error responding to invitation:', error);
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+
+  /**
+   * Request to join a group
+   * @route POST /api/groups/:id/join-request
+   * @access Private
+   */
+  async requestToJoin(req, res) {
+    try {
+      const { message = '' } = req.body;
+      const groupId = req.params.id;
+
+      const group = await Group.findById(groupId);
+      if (!group) {
+        return res.status(404).json({ message: 'Group not found' });
+      }
+
+      // Check if group allows join requests
+      if (group.privacy === 'private' && !group.settings?.allowJoinRequests) {
+        return res.status(403).json({ message: 'This group does not accept join requests' });
+      }
+
+      try {
+        const joinRequest = await group.requestToJoin(req.user.id, message);
+        
+        res.status(201).json({
+          message: 'Join request sent successfully',
+          joinRequest
+        });
+      } catch (requestError) {
+        return res.status(400).json({ message: requestError.message });
+      }
+    } catch (error) {
+      console.error('Error requesting to join group:', error);
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+
+  /**
+ * Get join requests for a group
+ * @route GET /api/groups/:id/join-requests
+ * @access Private (admin or creator only)
+ */
+  async getJoinRequests(req, res) {
+    try {
+      const groupId = req.params.id;
+
+      // Fetch group and populate requester info
+      const group = await Group.findById(groupId)
+        .populate('joinRequests.requestedBy', 'name email username')
+        .populate('joinRequests.reviewedBy', 'name email username');
+      if (!group) {
+        return res.status(404).json({ message: 'Group not found' });
+      }
+
+      // Check authorization: only admins or creator can view join requests
+      const userId = req.user.id;
+      const isAdmin = group.admins.some(admin => admin.toString() === userId);
+      const isCreator = group.createdBy.toString() === userId;
+      if (!isAdmin && !isCreator) {
+        return res.status(403).json({ message: 'Access denied. Only group admins or creator can view join requests' });
+      }
+
+      // Optionally filter by status query param, default to pending
+      let { status } = req.query; // e.g., ?status=pending
+      if (!status) {
+        status = 'pending';
+      }
+      const allowedStatuses = ['pending', 'approved', 'rejected'];
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({ message: `Invalid status filter. Must be one of: ${allowedStatuses.join(', ')}` });
+      }
+
+      // Filter joinRequests by status
+      const requests = group.joinRequests
+        .filter(reqObj => reqObj.status === status)
+        .map(reqObj => ({
+          _id: reqObj._id,
+          requestedBy: reqObj.requestedBy,   // populated user doc
+          status: reqObj.status,
+          requestedAt: reqObj.requestedAt,
+          reviewedBy: reqObj.reviewedBy || null,
+          reviewedAt: reqObj.reviewedAt || null,
+          message: reqObj.message || '',
+          reviewNote: reqObj.reviewNote || ''
+        }));
+
+      res.json({ joinRequests: requests });
+    } catch (error) {
+      console.error('Error fetching join requests:', error);
+      if (error.kind === 'ObjectId') {
+        return res.status(400).json({ message: 'Invalid group ID' });
+      }
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+  
+  async getUserJoinRequests(req, res) {
+    try {
+      const userId = req.user.id;
+      const { status } = req.query; // Only get status from query
+
+      // Call the method with correct parameters
+      const result = await Group.getUserJoinRequests(userId, status);
+
+      res.json({
+        success: true,
+        data: result // result is already the array of requests
+      });
+
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: error.message
+      });
+    }
+  }
+
+  /**
+   * Review join request (approve/reject)
+   * @route POST /api/groups/:id/join-requests/:requestId/review
+   * @access Private (admin only)
+   */
+  async reviewJoinRequest(req, res) {
+    try {
+      const { decision } = req.body; // 'approve' or 'reject'
+      const { id: groupId, userId } = req.params;
+
+
+      if (!['approve', 'reject'].includes(decision)) {
+        return res.status(400).json({ message: 'Invalid decision. Must be "approve" or "reject"' });
+      }
+
+      const group = await Group.findById(groupId);
+      if (!group) {
+        return res.status(404).json({ message: 'Group not found' });
+      }
+
+      // Check if current user is authorized to review requests
+      const isAdmin = group.admins.some(admin => admin.toString() === req.user.id);
+      if (!isAdmin && group.createdBy.toString() !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied. Only group admins can review join requests' });
+      }
+
+      try {
+        let result;
+        if (decision === 'approve') {
+          result = await group.approveJoinRequest(userId, req.user.id);
+        } else {
+          result = await group.rejectJoinRequest(userId, req.user.id);
+        }
+        
+        res.json({
+          message: `Join request ${decision}d successfully`,
+          joinRequest: result
+        });
+      } catch (reviewError) {
+        return res.status(400).json({ message: reviewError.message });
+      }
+    } catch (error) {
+      console.error('Error reviewing join request:', error);
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+  
   /**
    * Get single group by ID
    * @route GET /api/groups/:id
@@ -143,19 +520,25 @@ class GroupController {
         .populate('createdBy', 'name email')
         .populate('admins', 'name email')
         .populate('treasurer', 'name email')
-        .populate('members.user', 'name email');
+        .populate('members.user', 'name email')
+        .populate('invitations.invitedUser', 'name email username')
+        .populate('invitations.invitedBy', 'name email username')
+        .populate('joinRequests.requestedBy', 'name email username')
+        .populate('joinRequests.reviewedBy', 'name email username');
 
       if (!group) {
         return res.status(404).json({ message: 'Group not found' });
       }
 
-      // Check if user is a member of the group
-      const isMember = group.members.some(member => 
-        member.user._id.toString() === req.user.id && member.status === 'active'
-      );
+      // Check if user has access to view this group
+      const userId = req.user.id;
+      const isMember = group.members.some(member => member.user._id.toString() === userId);
+      const isAdmin = group.admins.some(admin => admin._id.toString() === userId);
+      const isCreator = group.createdBy._id.toString() === userId;
+      const isPublic = group.privacy === 'public';
 
-      if (!isMember) {
-        return res.status(403).json({ message: 'Access denied. Not a member of this group' });
+      if (!isPublic && !isMember && !isAdmin && !isCreator) {
+        return res.status(403).json({ message: 'Access denied. You do not have permission to view this group' });
       }
 
       res.json(group);
@@ -183,9 +566,12 @@ class GroupController {
       const {
         name,
         description,
+        admins,
+        treasurer,
         groupType,
         settings,
-        isActive
+        isActive,
+        privacy,
       } = req.body;
 
       // Get the group
@@ -213,6 +599,9 @@ class GroupController {
       if (description) group.description = description;
       if (groupType) group.groupType = groupType;
       if (typeof isActive === 'boolean') group.isActive = isActive;
+      if (privacy) group.privacy = privacy;
+      if (admins) group.admins = admins;
+      if (treasurer) group.treasurer = treasurer;
       
       // Update settings if provided
       if (settings) {

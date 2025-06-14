@@ -7,7 +7,9 @@ const loanRoutes = require('./routes/loanRoutes');
 const walletRoutes = require('./routes/walletRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const GroupRoutes = require('./routes/GroupRoutes');
+const ReportRoutes = require('./routes/ReportRoutes');
 const {stripeWebhook} = require('./controllers/paymentController');
+const SettingsRoutes = require('./routes/settingsRoutes');
 
 const app = express();
 
@@ -26,11 +28,13 @@ app.use('/api/wallet', walletRoutes);
 app.use('/api/group', GroupRoutes);
 
 app.use('/api/payments', paymentRoutes);
+app.use('/api/reports', ReportRoutes);
+app.use('/api/settings', SettingsRoutes);
 
 app.use((err, req, res, next) => {
     console.error(err.stack);
     res.status(500).json({ message: 'Something went wrong!' });
   });
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 7000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
