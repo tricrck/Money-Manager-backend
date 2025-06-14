@@ -20,7 +20,12 @@ app.post(
 );
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(cors());
+
+
+app.use(cors({
+  origin: process.env.URL_ORIGIN,
+  credentials: true // if you're using cookies/auth headers
+}));
 
 app.use('/api/users', userRoutes);
 app.use('/api/loans', loanRoutes);
