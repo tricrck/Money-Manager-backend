@@ -91,12 +91,19 @@ class GroupController {
    */
   async getPublicGroups(req, res) {
     try {
+      const userId = req.user.id;
       const { page = 1, limit = 10, search } = req.query;
       const skip = (page - 1) * limit;
 
-      // Build search query
-      let query = { privacy: 'public', isActive: true };
-      
+      // Base query: public and active
+      const query = {
+        privacy: 'public',
+        isActive: true,
+        members: { $not: { $elemMatch: { user: userId } } }, // Exclude groups where user is a member
+        joinRequests: { $not: { $elemMatch: { requestedBy: userId } } } // Exclude groups already requested
+      };
+
+      // Optional search filter
       if (search) {
         query.$or = [
           { name: { $regex: search, $options: 'i' } },
@@ -114,7 +121,6 @@ class GroupController {
 
       const total = await Group.countDocuments(query);
 
-      // Add member count to each group
       const groupsWithStats = groups.map(group => ({
         ...group.toObject(),
         memberCount: group.members.length
@@ -129,6 +135,7 @@ class GroupController {
           pages: Math.ceil(total / limit)
         }
       });
+
     } catch (error) {
       console.error('Error fetching public groups:', error);
       res.status(500).json({ message: 'Server error', error: error.message });
