@@ -25,7 +25,7 @@ class GroupController {
         admins,
         treasurer,
         settings,
-        privacy = 'private'
+        privacy,
       } = req.body;
 
       // Check if group with same name already exists
@@ -50,6 +50,8 @@ class GroupController {
           }
         ]
       };
+
+      console.log("Group Data", settings)
 
       // Add optional fields if provided
       if (admins && admins.length > 0) {

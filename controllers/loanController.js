@@ -2,6 +2,7 @@ const Loan = require('../models/Loan');
 const Wallet = require('../models/Wallet');
 const User = require('../models/User');
 const Group = require('../models/Group');
+const deleteFromS3 = require('../middleware/s3Delete');
 
 // Create a new loan (admin only)
 exports.createLoan = async (req, res) => {
@@ -43,11 +44,63 @@ exports.createLoan = async (req, res) => {
 
     // Calculate the repayment schedule
     loan.calculateRepaymentSchedule();
+    console.log('Repayment schedule calculated:', loan.repaymentSchedule);
     await loan.save();
 
     res.status(201).json(loan);
   } catch (error) {
     res.status(400).json({ error: error.message });
+  }
+};
+
+// Upload loan documents
+exports.uploadCollateralDocuments = async (req, res) => {
+  try {
+    const loanId = req.params.loanId;
+    const loan = await Loan.findById(loanId);
+
+    if (!loan) {
+      return res.status(404).json({ message: 'Loan not found' });
+    }
+
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ message: 'No documents uploaded' });
+    }
+
+    const uploadedFiles = req.files.map(file => file.location); // S3 public URLs
+
+    res.status(200).json({
+      message: 'Documents uploaded successfully',
+      uploadedFiles
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.removeCollateralDocument = async (req, res) => {
+  const { loanId } = req.params;
+  const { docUrl } = req.body;
+
+  try {
+    const loan = await Loan.findById(loanId);
+    if (!loan) return res.status(404).json({ message: 'Loan not found' });
+
+    const currentDocs = loan.collateral?.documents || [];
+    if (!currentDocs.includes(docUrl)) {
+      return res.status(400).json({ message: 'Document not found in loan record' });
+    }
+
+    // Remove from S3
+    await deleteFromS3(docUrl);
+
+    // Remove from MongoDB
+    loan.collateral.documents = currentDocs.filter(doc => doc !== docUrl);
+    await loan.save();
+
+    res.status(200).json({ message: 'Document deleted' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 };
 
@@ -500,6 +553,25 @@ exports.disburseLoan = async (req, res) => {
     }
     
     await loan.save();
+
+    if (loan.repaymentSchedule && loan.repaymentSchedule.length > 0) {
+      const loanPaymentEvents = loan.repaymentSchedule
+        .filter(payment => !payment.paid && new Date(payment.dueDate) > new Date())
+        .map(payment => ({
+          user: loan.user,
+          type: 'loan_payment',
+          title: `Loan Payment Due`,
+          description: `Amount: ${payment.totalAmount} KES`,
+          dueDate: payment.dueDate,
+          loan: loan._id,
+          group: loan.group,
+          status: 'pending'
+        }));
+
+      if (loanPaymentEvents.length > 0) {
+        await Event.insertMany(loanPaymentEvents);
+      }
+    }
     
     // Credit the user's wallet
     try {

@@ -2,6 +2,7 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
+const deleteFromS3 = require('../middleware/s3Delete');
 
 // Register a new user
 // Register a new user
@@ -49,6 +50,29 @@ exports.registerUser = async (req, res) => {
     res.json({ token, user: userResponse });
   } catch (error) {
     res.status(400).json({ error: error.message });
+  }
+};
+
+exports.uploadProfilePicture = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    if (!req.file || !req.file.location) {
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
+
+    // Optional: delete old picture
+    if (user.profilePicture) {
+      await deleteFromS3(user.profilePicture);
+    }
+
+    user.profilePicture = req.file.location;
+    await user.save();
+
+    res.status(200).json({ message: 'Profile picture updated', url: user.profilePicture });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 };
 

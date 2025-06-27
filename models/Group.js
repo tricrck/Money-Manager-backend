@@ -824,4 +824,69 @@ GroupSchema.statics.getUserJoinRequests = async function(userId, status = null) 
   }
 };
 
+// In GroupSchema.methods
+GroupSchema.methods.generateUpcomingEvents = async function() {
+  const events = [];
+  const now = new Date();
+  
+  // Generate contribution events
+  if (this.settings.contributionSchedule) {
+    const { frequency, amount, dueDay } = this.settings.contributionSchedule;
+    const nextContribution = this.calculateNextDueDate(frequency, dueDay);
+    
+    events.push({
+      type: 'contribution',
+      title: `Contribution Due - ${this.name}`,
+      description: `Contribution amount: ${amount} ${this.savingsAccount.currency}`,
+      startDate: nextContribution,
+      group: this._id,
+      isRecurring: true,
+      recurrencePattern: this.getRecurrencePattern(frequency, dueDay)
+    });
+  }
+  
+  // Generate meeting events
+  if (this.settings.meetingSchedule) {
+    const { frequency, dayOfMonth, time } = this.settings.meetingSchedule;
+    const nextMeeting = this.calculateNextMeetingDate(frequency, dayOfMonth, time);
+    
+    events.push({
+      type: 'meeting',
+      title: `Meeting - ${this.name}`,
+      description: `Group meeting scheduled`,
+      startDate: nextMeeting,
+      endDate: new Date(nextMeeting.getTime() + 60*60*1000), // 1 hour duration
+      group: this._id,
+      isRecurring: true,
+      recurrencePattern: this.getRecurrencePattern(frequency, dayOfMonth)
+    });
+  }
+  
+  return events;
+};
+
+GroupSchema.methods.calculateNextDueDate = function(frequency, dueDay) {
+  const now = new Date();
+  let nextDate = new Date(now);
+  
+  switch(frequency) {
+    case 'monthly':
+      nextDate.setDate(dueDay);
+      if (nextDate < now) {
+        nextDate.setMonth(nextDate.getMonth() + 1);
+      }
+      break;
+    case 'weekly':
+      // Calculate next occurrence of the specified day of week
+      const dayDiff = (dueDay - now.getDay() + 7) % 7;
+      nextDate.setDate(now.getDate() + dayDiff);
+      break;
+    case 'biweekly':
+      // Similar to weekly but with 2-week interval
+      break;
+  }
+  
+  return nextDate;
+};
+
 module.exports = mongoose.model('Group', GroupSchema);

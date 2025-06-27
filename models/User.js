@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 
 const UserSchema = new mongoose.Schema({
   // Basic information
@@ -107,5 +108,34 @@ UserSchema.methods.getFormattedPhone = function() {
   }
   return phone;
 };
+
+UserSchema.pre('save', async function (next) {
+  // Only generate username if it's not already set
+  if (!this.username) {
+    const base = this.name.trim().toLowerCase().replace(/\s+/g, '.');
+
+    let usernameCandidate;
+    let userExists = true;
+
+    // Try a few times to get a unique one
+    for (let i = 0; i < 5 && userExists; i++) {
+      const randomDigits = crypto.randomInt(1000, 9999); // 4 digit random number
+      usernameCandidate = `${base}${randomDigits}`;
+
+      // Check for uniqueness
+      const existing = await mongoose.models.User.findOne({ username: usernameCandidate });
+      userExists = !!existing;
+    }
+
+    if (userExists) {
+      return next(new Error('Could not generate a unique username'));
+    }
+
+    this.username = usernameCandidate;
+  }
+
+  next();
+});
+
 
 module.exports = mongoose.model('User', UserSchema);

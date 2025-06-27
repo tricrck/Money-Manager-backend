@@ -5,14 +5,17 @@ const {
   getAllUsers,
   getUser,
   updateUser,
-  deleteUser
+  deleteUser,
+  uploadProfilePicture
 } = require('../controllers/userController');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const isAdmin = require('../middleware/isAdmin');
+const upload = require('../middleware/upload'); // Assuming you have a middleware for handling file uploads
 
 // Auth routes - these should come BEFORE any ID-based routes
 router.post('/register', registerUser);
+router.post('/upload-profile/:userId', upload.single('profilePicture'), uploadProfilePicture);
 router.post('/login', loginUser);
 
 // Collection route
