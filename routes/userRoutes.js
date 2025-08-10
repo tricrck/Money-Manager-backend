@@ -6,7 +6,9 @@ const {
   getUser,
   updateUser,
   deleteUser,
-  uploadProfilePicture
+  uploadProfilePicture,
+  sendPasswordResetLink,
+  resetPassword
 } = require('../controllers/userController');
 const router = express.Router();
 const auth = require('../middleware/auth');
@@ -19,11 +21,13 @@ router.post('/upload-profile/:userId', upload.single('profilePicture'), uploadPr
 router.post('/login', loginUser);
 
 // Collection route
-router.get('/', [auth, isAdmin], getAllUsers);
+router.get('/', auth, getAllUsers);
 
 // Dynamic ID-based routes - these should come AFTER any specific routes
 router.get('/:id', auth, getUser);
 router.put('/:id', auth,  updateUser);
 router.delete('/:id', auth, deleteUser);
+router.post('/send-reset-link', sendPasswordResetLink);
+router.post('/reset-password/:token', resetPassword);
 
 module.exports = router;

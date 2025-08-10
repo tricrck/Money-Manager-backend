@@ -17,7 +17,8 @@ const {
   markDefaulted,
   getLoanStatistics,
   uploadCollateralDocuments,
-  removeCollateralDocument
+  removeCollateralDocument,
+  getGuarantorLoans
 } = require('../controllers/loanController');
 const auth = require('../middleware/auth');
 const isAdmin = require('../middleware/isAdmin');
@@ -26,9 +27,9 @@ const upload = require('../middleware/upload');
 const router = express.Router();
 
 // Admin-only routes
-router.post('/', [auth, isAdmin], createLoan);
+router.post('/', auth, createLoan);
 router.get('/', [auth, isAdmin], getAllLoans);
-router.put('/:id', [auth, isAdmin], updateLoan);
+router.put('/:id', auth, updateLoan);
 router.delete('/:id', [auth, isAdmin], deleteLoan);
 router.post('/:id/review', [auth, isAdmin], reviewLoan);
 router.post('/:id/disburse', [auth, isAdmin], disburseLoan);
@@ -50,5 +51,5 @@ router.post(
   uploadCollateralDocuments
 );
 router.delete('/remove-collateral/:loanId', removeCollateralDocument);
-
+router.get('/guarantor/:id', auth, getGuarantorLoans);
 module.exports = router;

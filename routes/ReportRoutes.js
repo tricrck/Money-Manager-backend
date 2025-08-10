@@ -71,7 +71,7 @@ const paymentMethodValidation = [
  * @query   {string} status - Filter by status
  * @query   {string} format - Export format (json, csv, pdf)
  */
-router.get('/user/:userId/statement',
+router.post('/user/:userId/statement',
   auth,
   [
     param('userId')

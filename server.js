@@ -11,6 +11,7 @@ const ReportRoutes = require('./routes/ReportRoutes');
 const {stripeWebhook} = require('./controllers/paymentController');
 const SettingsRoutes = require('./routes/settingsRoutes');
 const calendarRoutes = require('./routes/calendarRoutes')
+const messageRoutes = require('./routes/MessageRoutes');
 
 const app = express();
 
@@ -37,6 +38,7 @@ app.use('/api/payments', paymentRoutes);
 app.use('/api/reports', ReportRoutes);
 app.use('/api/settings', SettingsRoutes);
 app.use('/api/calender', calendarRoutes);
+app.use('/api/messages', messageRoutes);
 
 app.use((err, req, res, next) => {
     console.error(err.stack);

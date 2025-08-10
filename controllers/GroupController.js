@@ -412,9 +412,9 @@ class GroupController {
       const userId = req.user.id;
       const isAdmin = group.admins.some(admin => admin.toString() === userId);
       const isCreator = group.createdBy.toString() === userId;
-      if (!isAdmin && !isCreator) {
-        return res.status(403).json({ message: 'Access denied. Only group admins or creator can view join requests' });
-      }
+      // if (!isAdmin && !isCreator) {
+      //   return res.status(403).json({ message: 'Access denied. Only group admins or creator can view join requests' });
+      // }
 
       // Optionally filter by status query param, default to pending
       let { status } = req.query; // e.g., ?status=pending
@@ -541,9 +541,16 @@ class GroupController {
 
       // Check if user has access to view this group
       const userId = req.user.id;
-      const isMember = group.members.some(member => member.user._id.toString() === userId);
-      const isAdmin = group.admins.some(admin => admin._id.toString() === userId);
-      const isCreator = group.createdBy._id.toString() === userId;
+      const isMember = Array.isArray(group.members) && group.members.some(member =>
+        member?.user?._id?.toString() === userId
+      );
+
+      const isAdmin = Array.isArray(group.admins) && group.admins.some(admin =>
+        admin?._id?.toString() === userId
+      );
+
+      const isCreator = group.createdBy?._id?.toString() === userId;
+
       const isPublic = group.privacy === 'public';
 
       if (!isPublic && !isMember && !isAdmin && !isCreator) {

@@ -2,7 +2,52 @@ const Loan = require('../models/Loan');
 const Wallet = require('../models/Wallet');
 const User = require('../models/User');
 const Group = require('../models/Group');
+const Settings = require('../models/Settings');
 const deleteFromS3 = require('../middleware/s3Delete');
+
+const getLoanSettings = async ({ userId, groupId, loanType }) => {
+  const settings = {
+    interestRate: 10,
+    processingFee: 0,
+    requiresGuarantors: false,
+    guarantorsRequired: 0,
+    maxLoanLimit: 0,
+    maxLoanDuration: 12,
+
+  };
+
+  const group = await Group.findById(groupId);
+  const sysSettings = await Settings.findOne();
+
+  if (loanType === 'personal' && groupId) {
+    if (!group) throw new Error('Group not found');
+
+    const loanSettings = group.settings?.loanSettings ?? {};
+    settings.interestRate = loanSettings.interestRate ?? settings.interestRate;
+    settings.processingFee = loanSettings.processingFee ?? settings.processingFee;
+    settings.requiresGuarantors = loanSettings.requiresGuarantors ?? false;
+    settings.guarantorsRequired = loanSettings.guarantorsRequired ?? 0;
+    settings.maxLoanDuration = loanSettings.maxRepaymentPeriod ?? settings.maxLoanDuration;
+
+    // Find member contribution
+    const member = group.members.find(m => m.user.toString() === userId.toString());
+    const totalSavings = member?.contributions?.total ?? 0;
+
+    settings.maxLoanLimit = totalSavings * (loanSettings.maxLoanMultiplier || 3);
+  } else {
+    settings.interestRate = sysSettings?.defaultInterestRate ?? settings.interestRate;
+    settings.processingFee = sysSettings?.processingFee ?? settings.processingFee;
+    const totalSavings = group.savingsAccount.balance;
+    const maxLoanMultiplier = sysSettings?.maxLoanMultiplier || 3;
+    const maxLoanAmount = totalSavings * maxLoanMultiplier;
+    settings.maxLoanLimit = maxLoanAmount || sysSettings?.maxLoanAmount;
+    settings.requiresGuarantors = true;
+    settings.guarantorsRequired = sysSettings?.guarantorsRequired ?? 0;
+    settings.maxLoanDuration = sysSettings?.maxLoanDuration ?? settings.maxLoanDuration;
+  }
+
+  return settings;
+};
 
 // Create a new loan (admin only)
 exports.createLoan = async (req, res) => {
@@ -13,42 +58,55 @@ exports.createLoan = async (req, res) => {
       loanType,
       principalAmount,
       repaymentPeriod,
-      interestRate,
       interestType,
-      processingFee,
       purpose,
       guarantors,
       collateral
     } = req.body;
 
-    // Validate required fields
     if (!user || !principalAmount || !repaymentPeriod) {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
-    // Create the loan
+    // 🧠 Load rules
+    const settings = await getLoanSettings({ userId: user, groupId: group, loanType });
+
+    // 🚨 Enforce max limit
+    if (principalAmount > settings.maxLoanLimit) {
+      return res.status(400).json({ message: `Requested loan exceeds max allowable limit of ${settings.maxLoanLimit}` });
+    }
+
+    // 🚨 Guarantor enforcement
+    if (settings.requiresGuarantors && (!guarantors || guarantors.length < settings.guarantorsRequired)) {
+      return res.status(400).json({ message: `At least ${settings.guarantorsRequired} guarantors required` });
+    }
+    // 🚨 Validate repayment period
+    if (repaymentPeriod > settings.maxLoanDuration) {
+      return res.status(400).json({ message: `Repayment period cannot exceed ${settings.maxLoanDuration} months` });
+    }
+
+    // 💸 Create loan
     const loan = await Loan.create({
       user,
-      group,
+      group: group || null,
       loanType: loanType || 'personal',
       principalAmount,
       repaymentPeriod,
-      interestRate: interestRate || 10,
+      interestRate: settings.interestRate,
       interestType: interestType || 'simple',
-      processingFee: processingFee || 0,
+      processingFee: settings.processingFee,
       purpose,
       guarantors: guarantors || [],
       collateral: collateral || {},
       status: 'pending'
     });
 
-    // Calculate the repayment schedule
     loan.calculateRepaymentSchedule();
-    console.log('Repayment schedule calculated:', loan.repaymentSchedule);
     await loan.save();
 
     res.status(201).json(loan);
   } catch (error) {
+    console.error('Loan creation error:', error);
     res.status(400).json({ error: error.message });
   }
 };
@@ -78,6 +136,7 @@ exports.uploadCollateralDocuments = async (req, res) => {
   }
 };
 
+
 exports.removeCollateralDocument = async (req, res) => {
   const { loanId } = req.params;
   const { docUrl } = req.body;
@@ -87,18 +146,16 @@ exports.removeCollateralDocument = async (req, res) => {
     if (!loan) return res.status(404).json({ message: 'Loan not found' });
 
     const currentDocs = loan.collateral?.documents || [];
-    if (!currentDocs.includes(docUrl)) {
-      return res.status(400).json({ message: 'Document not found in loan record' });
+    if (currentDocs.includes(docUrl)) {
+      // Remove from S3
+      await deleteFromS3(docUrl);
+
+        // Remove from MongoDB
+      loan.collateral.documents = currentDocs.filter(doc => doc !== docUrl);
+      await loan.save();
+
+      res.status(200).json({ message: 'Document deleted' });
     }
-
-    // Remove from S3
-    await deleteFromS3(docUrl);
-
-    // Remove from MongoDB
-    loan.collateral.documents = currentDocs.filter(doc => doc !== docUrl);
-    await loan.save();
-
-    res.status(200).json({ message: 'Document deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -142,9 +199,9 @@ exports.getAllLoans = async (req, res) => {
     let query = {};
     
     if (status) query.status = status;
-    if (loanType) query.loanType = loanType;
     if (user) query.user = user;
     if (group) query.group = group;
+    query.loanType = 'group';
     
     // Amount range
     if (minAmount || maxAmount) {
@@ -217,13 +274,36 @@ exports.updateLoan = async (req, res) => {
   try {
     const { id } = req.params;
     const updateData = req.body;
-    
-    // Prevent status changes through this endpoint
+
+    // Prevent direct status changes through this endpoint
     if (updateData.status) delete updateData.status;
-    
+
     const loan = await Loan.findById(id);
     if (!loan) return res.status(404).json({ message: 'Loan not found' });
-    
+
+    // Load loan settings based on updated or existing values
+    const settings = await getLoanSettings({
+      userId: loan.user.toString(),
+      groupId: loan.group?.toString(),
+      loanType: loan.loanType
+    });
+
+    // 🚨 Validate updated principalAmount
+    if (updateData.principalAmount && updateData.principalAmount > settings.maxLoanLimit) {
+      return res.status(400).json({ message: `Principal amount exceeds max limit of ${settings.maxLoanLimit}` });
+    }
+
+    // 🚨 Validate updated repaymentPeriod
+    if (updateData.repaymentPeriod && updateData.repaymentPeriod > settings.maxLoanDuration) {
+      return res.status(400).json({ message: `Repayment period cannot exceed ${settings.maxLoanDuration} months` });
+    }
+
+    // 🚨 Validate guarantors if required
+    const newGuarantors = updateData.guarantors || loan.guarantors;
+    if (settings.requiresGuarantors && (!newGuarantors || newGuarantors.length < settings.guarantorsRequired)) {
+      return res.status(400).json({ message: `At least ${settings.guarantorsRequired} guarantors required` });
+    }
+
     // Check if we need to recalculate repayment schedule
     const needsRecalculation = [
       'principalAmount',
@@ -233,26 +313,27 @@ exports.updateLoan = async (req, res) => {
       'processingFee',
       'disbursementDate'
     ].some(field => updateData[field] !== undefined);
-    
+
     // Update the loan
     Object.assign(loan, updateData);
-    
+
     // Recalculate repayment schedule if needed
     if (needsRecalculation && loan.status !== 'completed' && loan.status !== 'defaulted') {
       loan.calculateRepaymentSchedule();
     }
-    
-    // Add note about the update if provided
+
+    // Add note if provided
     if (req.body.noteText) {
       loan.notes.push({
         text: req.body.noteText,
-        author: req.user._id // Assuming req.user is set by authentication middleware
+        author: req.user._id // assumes req.user is set by auth middleware
       });
     }
-    
+
     await loan.save();
     res.json(loan);
   } catch (error) {
+    console.error('Loan update error:', error);
     res.status(500).json({ error: error.message });
   }
 };
@@ -471,7 +552,7 @@ exports.reviewLoan = async (req, res) => {
     }
     
     // For group loans, check if all required guarantors have approved
-    if (loan.loanType === 'group' && status === 'approved') {
+    if (loan.status === 'approved') {
       const pendingGuarantors = loan.guarantors.filter(g => !g.approved);
       if (pendingGuarantors.length > 0) {
         return res.status(400).json({ 
@@ -520,6 +601,11 @@ exports.disburseLoan = async (req, res) => {
     if (!loan) return res.status(404).json({ message: 'Loan not found' });
     
     // Ensure loan is in approved status
+    if (loan.status === 'disbursed') {
+      return res.status(400).json({ 
+        message: 'Loan has already been disbursed' 
+      });
+    }
     if (loan.status !== 'approved') {
       return res.status(400).json({ 
         message: 'Only approved loans can be disbursed' 
@@ -572,28 +658,46 @@ exports.disburseLoan = async (req, res) => {
         await Event.insertMany(loanPaymentEvents);
       }
     }
-    
-    // Credit the user's wallet
-    try {
-      const wallet = await Wallet.findOne({ user: loan.user });
-      if (wallet) {
-        wallet.balance += loan.disbursedAmount;
-        wallet.transactions.push({
-          type: 'credit',
-          amount: loan.disbursedAmount,
-          description: `Loan disbursement for loan ID: ${loan._id}`,
-          date: new Date()
-        });
-        await wallet.save();
-      }
-    } catch (walletError) {
-      // Continue with the disbursement even if wallet update fails
-      // but add a note about the issue
-      loan.notes.push({
-        text: `Failed to credit wallet: ${walletError.message}`,
-        author: adminId
+    if (loan.loanType === "group"){
+      // Disburse to group account
+      const group = await Group.findById(loan.group);
+      group.loanAccount.balance += loan.disbursedAmount;
+      
+      // Record transaction
+      group.transactions.push({
+        type: 'loan_disbursement',
+        amount: loan.disbursedAmount,
+        description: `Group loan disbursement - ${loan._id}`,
+        method: 'system',
+        affectedAccount: 'loanAccount',
+        status: 'completed'
       });
-      await loan.save();
+      
+      await group.save();
+    } else{
+      // Credit the user's wallet
+        try {
+        const wallet = await Wallet.findOne({ user: loan.user });
+        if (wallet) {
+          wallet.balance += loan.disbursedAmount;
+          wallet.transactions.push({
+            type: 'credit',
+            amount: loan.disbursedAmount,
+            description: `Loan disbursement for loan ID: ${loan._id}`,
+            date: new Date()
+          });
+          await wallet.save();
+        }
+      } catch (walletError) {
+        // Continue with the disbursement even if wallet update fails
+        // but add a note about the issue
+        loan.notes.push({
+          text: `Failed to credit wallet: ${walletError.message}`,
+          author: adminId
+        });
+        await loan.save();
+    }
+
     }
     
     res.json({ 
@@ -895,5 +999,112 @@ exports.getLoanStatistics = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+};
+
+exports.repayGroupLoan = async (req, res) => {
+  try {
+    const { loanId } = req.params;
+    const { amount, memberId, paymentMethod } = req.body;
+    
+    const loan = await Loan.findById(loanId).populate('group');
+    if (!loan || loan.loanType !== 'group') throw new Error('Group loan not found');
+    
+    // Find member in group
+    const group = await Group.findById(loan.group);
+    const member = group.members.find(m => m.user.toString() === memberId);
+    if (!member) throw new Error('Member not found in group');
+    
+    // Process repayment from member's wallet
+    const wallet = await Wallet.findOne({ user: memberId });
+    if (!wallet || wallet.balance < amount) {
+      throw new Error('Insufficient wallet balance');
+    }
+    
+    // Deduct from wallet
+    wallet.balance -= amount;
+    wallet.transactions.push({
+      type: 'loan_repayment',
+      amount: -amount,
+      description: `Repayment for group loan ${loan._id}`,
+      relatedEntity: {
+        entityType: 'loan',
+        entityId: loan._id
+      }
+    });
+    await wallet.save();
+    
+    // Add to group's loan repayment
+    group.loanAccount.balance -= amount;
+    
+    // Record transaction
+    group.transactions.push({
+      type: 'loan_repayment',
+      amount,
+      member: memberId,
+      method: paymentMethod || 'wallet',
+      description: `Loan repayment from member ${memberId}`,
+      affectedAccount: 'loanAccount',
+      status: 'completed'
+    });
+    
+    // Update loan repayment status
+    let remainingAmount = amount;
+    const today = new Date();
+    
+    for (let i = 0; i < loan.repaymentSchedule.length; i++) {
+      const installment = loan.repaymentSchedule[i];
+      if (installment.paid) continue;
+      
+      const remainingInstallment = installment.totalAmount - installment.paidAmount;
+      
+      if (remainingAmount >= remainingInstallment) {
+        installment.paidAmount = installment.totalAmount;
+        installment.paid = true;
+        installment.paidDate = today;
+        remainingAmount -= remainingInstallment;
+      } else {
+        installment.paidAmount += remainingAmount;
+        remainingAmount = 0;
+      }
+      
+      if (remainingAmount <= 0) break;
+    }
+    
+    loan.amountRepaid = (loan.amountRepaid || 0) + amount;
+    
+    // Check if fully repaid
+    const isFullyRepaid = loan.repaymentSchedule.every(i => i.paid);
+    if (isFullyRepaid) {
+      loan.status = 'completed';
+      loan.completionDate = today;
+    }
+    
+    await Promise.all([loan.save(), group.save()]);
+    
+    res.json({
+      message: 'Repayment processed successfully',
+      loanStatus: loan.status,
+      remainingLoanBalance: loan.principalAmount - loan.amountRepaid,
+      groupLoanAccountBalance: group.loanAccount.balance
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+// Upload loan documents
+exports.getGuarantorLoans = async (req, res) => {
+  try {
+    const guarantorId = req.params.id;
+
+    const loans = await Loan.getGuarantorLoans(guarantorId);
+
+    res.status(200).json({
+      result: loans,
+      message: 'Guarantor loans retrieved successfully'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 };

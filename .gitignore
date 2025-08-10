@@ -7,3 +7,5 @@ package-lock.json
 # Logs
 logs/
 *.log
+# Firebase service account keys
+config/moneymanager-484ed-firebase-adminsdk-fbsvc-cd8afa63d4.json

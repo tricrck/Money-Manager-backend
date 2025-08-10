@@ -2,6 +2,7 @@ const Group = require('../models/Group');
 const Wallet = require('../models/Wallet');
 const User = require('../models/User');
 const { validationResult } = require('express-validator');
+const { sendEmail, sendPushNotification } = require('./messagingController');
 
 /**
  * Contribution Controller
@@ -20,13 +21,18 @@ class ContributionController {
     }
 
     try {
-      const { amount, notes } = req.body;
+      const { totalAmount, allocations, verifiedBy } = req.body;
       const userId = req.user.id;
       const groupId = req.params.id;
 
-      // Validate amount
-      if (!amount || amount <= 0) {
-        return res.status(400).json({ message: 'Please provide a valid amount' });
+      // Validate allocations
+      if (!Array.isArray(allocations) || allocations.length === 0) {
+        return res.status(400).json({ message: 'Please provide valid allocations' });
+      }
+
+      const calculatedTotal = allocations.reduce((sum, item) => sum + item.amount, 0);
+      if (!totalAmount || totalAmount <= 0 || totalAmount !== calculatedTotal) {
+        return res.status(400).json({ message: 'Total amount must match sum of allocations' });
       }
 
       // Find the group
@@ -36,10 +42,9 @@ class ContributionController {
       }
 
       // Check if user is a member of the group
-      const isMember = group.members.some(member => 
+      const isMember = group.members.some(member =>
         member.user.toString() === userId && member.status === 'active'
       );
-
       if (!isMember) {
         return res.status(403).json({ message: 'Access denied. Not an active member of this group' });
       }
@@ -51,15 +56,14 @@ class ContributionController {
       }
 
       // Check if wallet has sufficient funds
-      if (wallet.balance < amount) {
+      if (wallet.balance < totalAmount) {
         return res.status(400).json({ message: 'Insufficient funds in your wallet' });
       }
 
       // Start transaction
-      // Create transaction record for wallet withdrawal
       const transaction = {
         type: 'withdrawal',
-        amount,
+        amount: totalAmount,
         relatedEntity: {
           entityType: 'group',
           entityId: groupId
@@ -70,29 +74,50 @@ class ContributionController {
         status: 'completed'
       };
 
-      // Add transaction and update wallet balance
+      // Apply wallet transaction and update balance
       wallet.transactions.push(transaction);
-      await wallet.updateBalance(amount, 'withdrawal');
+      await wallet.updateBalance(totalAmount, 'withdrawal');
 
       // Add contribution to group
       const contribution = await group.addWalletContribution(
         userId,
-        amount,
-        userId, // Self-verified since it's a wallet transfer
-        notes || `Wallet contribution of ${amount} ${wallet.currency}`
+        totalAmount,
+        verifiedBy || userId, // treasurer/admin or self
+        allocations
       );
+
+      const user = await User.findById(userId);
+      const message = {
+        title: 'Contribution Received',
+        body: `Your contribution of KES ${totalAmount} to ${group.name} has been received and recorded.`
+      };
+      // Send push notification and handle the result
+      const notificationResult = await sendPushNotification(user._id, message);
+      
+      if (notificationResult.success) {
+        console.log('Push notification sent successfully');
+      } else {
+        console.log(`Push notification failed: ${notificationResult.reason}`);
+        // Don't throw error - just log it since the main operation (contribution) succeeded
+      }
+      // await sendEmail(user.email, message.title, message.body);
 
       res.json({
         message: 'Contribution successful',
         walletBalance: wallet.balance,
-        groupSavingsBalance: group.savingsAccount.balance,
-        contribution: contribution
+        groupBalances: {
+          savings: group.savingsAccount.balance,
+          loan: group.loanAccount.balance,
+          group: group.groupAccount.balance
+        },
+        contribution
       });
     } catch (error) {
       console.error('Error making wallet contribution:', error);
       res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
+
 
   /**
    * Fund a user's wallet from group account

@@ -3,7 +3,14 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 const deleteFromS3 = require('../middleware/s3Delete');
+const { sendEmailController  } = require('./messagingController');
+const Settings = require('../models/Settings');
 
+
+const getSettings = async () => {
+  const sysSettings = await Settings.findOne();
+  return sysSettings;
+}
 // Register a new user
 // Register a new user
 exports.registerUser = async (req, res) => {
@@ -39,12 +46,13 @@ exports.registerUser = async (req, res) => {
     const userResponse = user.toObject();
     delete userResponse.password;
     delete userResponse.notificationPreferences;
+    const settings = await getSettings();
 
     // Generate JWT token
     const token = jwt.sign(
       { user: { id: user._id } }, 
       process.env.JWT_SECRET, 
-      { expiresIn: '7d' }
+      { expiresIn: `${settings.passwordExpiry}d` }
     );
 
     res.json({ token, user: userResponse });
@@ -97,12 +105,22 @@ exports.loginUser = async (req, res) => {
     const userObject = user.toObject();
     delete userObject.password;
     delete userObject.notificationPreferences;
+    const settings = await getSettings();
+    if (!settings) {
+      return res.status(500).json({ message: 'Settings not found' });
+    }
+    
+    let expiry = settings.passwordExpiry;
+    if (typeof expiry === 'number') {
+      expiry = `${expiry}d`; // convert to "7d", "1d", etc.
+    }
+
 
     // Generate JWT token
     const token = jwt.sign(
       { user: { id: user._id } }, 
       process.env.JWT_SECRET, 
-      { expiresIn: '7d' }
+      { expiresIn: expiry }
     );
 
     res.json({ token, user: userObject });
@@ -186,5 +204,49 @@ exports.deleteUser = async (req, res) => {
     res.json({ message: 'User deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+};
+
+exports.sendPasswordResetLink = async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    const token = jwt.sign(
+      { userId: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: '15m' }
+    );
+
+    const resetLink = `${process.env.URL_ORIGIN}/reset-password/${token}`;
+
+    await sendEmailController(
+      email,
+      'Password Reset Request, expires in 15 minutes',
+      `Click this link to reset your password: ${resetLink}`
+    );
+
+    res.json({ message: 'Password reset link sent' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.resetPassword = async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { newPassword } = req.body;
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.userId);
+    if (!user) return res.status(404).json({ message: 'Invalid token or user not found' });
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    await user.save();
+
+    res.json({ message: 'Password updated successfully' });
+  } catch (error) {
+    res.status(400).json({ error: 'Token expired or invalid' });
   }
 };

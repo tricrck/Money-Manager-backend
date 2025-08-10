@@ -12,7 +12,7 @@ const LoanSchema = new mongoose.Schema({
   },
   loanType: {
     type: String,
-    enum: ['personal', 'group', 'emergency', 'business'],
+    enum: ['personal', 'group'],
     default: 'personal'
   },
   principalAmount: { 
@@ -208,6 +208,22 @@ LoanSchema.methods.calculateRepaymentSchedule = function() {
   this.totalRepayableAmount = totalRepayable;
   return schedule;
 };
+
+LoanSchema.statics.getGuarantorLoans = async function(guarantorId) {
+  const loans = await this.find({
+    guarantors: {
+      $elemMatch: {
+        user: new mongoose.Types.ObjectId(guarantorId)
+      }
+    }
+  })
+  .populate('user', 'name email')
+  .populate('group', 'name')
+  .populate('guarantors.user', 'name email');
+
+  return loans;
+};
+
 
 
 module.exports = mongoose.model('Loan', LoanSchema);

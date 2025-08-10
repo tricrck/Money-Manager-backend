@@ -11,14 +11,16 @@ const moment = require('moment');
 exports.getUserStatement = async (req, res) => {
   try {
     const { userId } = req.params;
-    const { 
+    const {
       startDate, 
       endDate, 
-      type = 'monthly', // monthly, weekly, daily, custom
+      type = 'monthly',
       paymentMethod, 
       status,
-      format = 'json' // json, csv, pdf
-    } = req.query;
+      format = 'json'
+    } = req.body.startDate ? req.body : req.query;
+
+    console.log(req.pqrams, req.body, req.query);
 
     // Calculate date range based on type
     let dateRange = {};
@@ -44,13 +46,18 @@ exports.getUserStatement = async (req, res) => {
         };
         break;
       case 'custom':
-        if (!startDate || !endDate) {
-          return res.status(400).json({ error: 'Start date and end date are required for custom range' });
-        }
-        dateRange = {
-          startDate: moment(startDate).startOf('day').toDate(),
-          endDate: moment(endDate).endOf('day').toDate()
-        };
+         if (!startDate || !endDate) {
+            return res.status(400).json({ error: 'Start date and end date are required for custom range' });
+          }
+
+          if (moment(startDate).isAfter(moment(endDate))) {
+            return res.status(400).json({ error: 'Start date must be before or equal to end date' });
+          }
+
+          dateRange = {
+            startDate: moment(startDate).startOf('day').toDate(),
+            endDate: moment(endDate).endOf('day').toDate()
+          };
         break;
       default:
         dateRange = {
@@ -58,6 +65,8 @@ exports.getUserStatement = async (req, res) => {
           endDate: moment().endOf('month').toDate()
         };
     }
+
+     console.log(`User IDates:`, startDate, endDate);
 
     // Build query filters
     const filters = {
@@ -67,6 +76,7 @@ exports.getUserStatement = async (req, res) => {
         $lte: dateRange.endDate
     }
     };
+    console.log(`Filters:`, filters);
 
     if (paymentMethod) filters.paymentMethod = paymentMethod;
     if (status) filters.status = status;
@@ -80,6 +90,7 @@ exports.getUserStatement = async (req, res) => {
     // Get wallet transactions for the same period
     const wallet = await Wallet.findOne({ user: userId });
     let walletTransactions = [];
+    console.log(`Wallet:`, wallet);
     
     if (wallet) {
       walletTransactions = wallet.transactions.filter(transaction => {
@@ -87,6 +98,7 @@ exports.getUserStatement = async (req, res) => {
         return transactionDate.isBetween(dateRange.startDate, dateRange.endDate, null, '[]');
       });
     }
+    console.log(`Wallet Transactions:`, walletTransactions);
 
     // Calculate summary statistics
     const summary = {

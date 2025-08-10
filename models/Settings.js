@@ -9,6 +9,9 @@ const settingsSchema = new mongoose.Schema({
   defaultInterestRate: { type: Number, default: 15 },
   maxLoanAmount: { type: Number, default: 500000 },
   minLoanAmount: { type: Number, default: 1000 },
+  maxLoanMultiplier: { type: Number, default: 3 },
+  maxLoanDuration: { type: Number, default: 12 }, // in months
+  guarantorsRequired: { type: Number, default: 7 },
   
   // Notification Settings
   emailNotifications: { type: Boolean, default: true },
@@ -29,13 +32,13 @@ const settingsSchema = new mongoose.Schema({
   lateFeePercentage: { type: Number, default: 5 },
   
   // System Info (read-only)
-  serverStatus: { type: String, default: 'healthy' },
+  serverStatus: { type: String, default: 'Dead' },
   lastBackup: { type: Date, default: Date.now },
-  systemVersion: { type: String, default: '2.1.0' },
-  databaseSize: { type: String, default: '2.4 GB' },
+  systemVersion: { type: String, default: '0.0.0' },
+  databaseSize: { type: String, default: '0.0 GB' },
   
   // API Key (should be encrypted in production)
-  apiKey: { type: String, default: 'sk_live_51H7xvxvxvxvxvxvxvxvxvxvxvxvxvxv' }
+  apiKey: { type: String, default: 'not intergrated' }
 }, { timestamps: true });
 
 module.exports = mongoose.model('Settings', settingsSchema);

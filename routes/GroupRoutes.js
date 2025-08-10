@@ -131,12 +131,15 @@ router.post(
   [
     auth,
     [
-      check('amount', 'Amount is required and must be positive').isFloat({ min: 0.01 }),
-      check('notes').optional().isString()
+      check('totalAmount', 'Amount is required and must be positive').isFloat({ min: 0.01 }),
+      check('allocations', 'Allocations must be a non-empty array').isArray({ min: 1 }),
+      check('allocations.*.account', 'Each allocation must have a valid account').isString().notEmpty(),
+      check('allocations.*.amount', 'Each allocation must have a positive amount').isFloat({ min: 0.01 })
     ]
   ],
   contributionController.contributeFromWallet
 );
+
 
 // Record cash contribution
 // POST /api/groups/:id/contributions/cash

@@ -148,6 +148,16 @@ const GroupSchema = new mongoose.Schema({
       enum: ['public', 'private', 'invite_only'],
       default: 'private'
     },
+    groupAccount: {
+      balance: {
+        type: Number,
+        default: 0
+      },
+      currency: {
+        type: String,
+        default: 'KES'
+      }
+    },
     loanAccount: {
       balance: {
         type: Number,
@@ -220,7 +230,7 @@ const GroupSchema = new mongoose.Schema({
       },
       affectedAccount: {
         type: String,
-        enum: ['savingsAccount', 'loanAccount', 'interestEarnedAccount', 'finesAccount'],
+        enum: ['savingsAccount', 'loanAccount', 'interestEarnedAccount', 'finesAccount', 'groupAccount'],
         required: true
       },
       status: {
@@ -240,7 +250,7 @@ const GroupSchema = new mongoose.Schema({
           type: Number,
           default: 0
         },
-        dueDay: Number // Day of week or month when contributions are due
+        dueDay: Number 
       },
       loanSettings: {
         maxLoanMultiplier: {
@@ -289,60 +299,119 @@ const GroupSchema = new mongoose.Schema({
     }
   }, { timestamps: true });
 
+
+// Method  to Process Group internal transfers
+GroupSchema.methods.processTransfer = async function(fromAccountType, toAccountType, amount, verifiedBy) {
+  if (!this[fromAccountType] || !this[toAccountType]) {
+    throw new Error('Invalid account type specified');
+  }
+
+  if (this[fromAccountType].balance < amount) {
+    throw new Error('Insufficient funds in the source account');
+  }
+
+  // Transfer logic
+  this[fromAccountType].balance -= amount;
+  this[toAccountType].balance += amount;
+
+  // Add transaction records (two records to track movement if needed)
+  this.transactions.push({
+    type: 'expense',
+    amount,
+    date: new Date(),
+    method: 'wallet',
+    description: `Transfer from ${fromAccountType} to ${toAccountType}`,
+    verifiedBy,
+    affectedAccount: fromAccountType,
+    status: 'completed'
+  });
+
+  this.transactions.push({
+    type: 'contribution',
+    amount,
+    date: new Date(),
+    method: 'wallet',
+    description: `Transfer into ${toAccountType} from ${fromAccountType}`,
+    verifiedBy,
+    affectedAccount: toAccountType,
+    status: 'completed'
+  });
+
+  await this.save();
+
+  return {
+    success: true,
+    fromAccountBalance: this[fromAccountType].balance,
+    toAccountBalance: this[toAccountType].balance
+  };
+};
+
 // Method to add a contribution from a member's wallet
-GroupSchema.methods.addWalletContribution = async function(memberId, amount, verifiedBy, notes) {
+GroupSchema.methods.addWalletContribution = async function(memberId, totalAmount, verifiedBy, allocations) {
   try {
-    // Find the member in the group
     const memberIndex = this.members.findIndex(m => m.user.toString() === memberId);
-    if (memberIndex === -1) {
-      throw new Error('Member not found in this group');
+    if (memberIndex === -1) throw new Error('Member not found in this group');
+
+    let totalAllocated = 0;
+
+    for (const alloc of allocations) {
+      const { account, amount } = alloc;
+      if (!this[account]) throw new Error(`Invalid account specified: ${account}`);
+
+      this[account].balance += amount;
+      totalAllocated += amount;
+
+      // Add to group transactions
+      this.transactions.push({
+        type: 'contribution',
+        amount,
+        date: Date.now(),
+        member: memberId,
+        method: 'wallet',
+        description: `Wallet contribution to ${account}`,
+        verifiedBy,
+        affectedAccount: account,
+        status: 'completed'
+      });
     }
 
-    // Create a new contribution record
+    if (totalAllocated !== totalAmount) {
+      throw new Error('Total allocation does not match the contribution amount');
+    }
+
+    // Add to member contribution history
     const contributionRecord = {
-      amount,
+      amount: totalAmount,
       date: Date.now(),
       method: 'wallet',
       verifiedBy,
-      notes,
+      notes: JSON.stringify(allocations),
       status: 'verified'
     };
 
-    // Add to member's contributions history
     if (!this.members[memberIndex].contributions) {
       this.members[memberIndex].contributions = { total: 0, history: [] };
     }
 
     this.members[memberIndex].contributions.history.push(contributionRecord);
-    this.members[memberIndex].contributions.total += amount;
+    this.members[memberIndex].contributions.total += totalAmount;
 
-    // Add to group transactions
-    this.transactions.push({
-      type: 'contribution',
-      amount,
-      date: Date.now(),
-      member: memberId,
-      method: 'wallet',
-      description: notes || 'Wallet contribution',
-      verifiedBy,
-      affectedAccount: 'savingsAccount',
-      status: 'completed'
-    });
-
-    // Update the savings account balance
-    this.savingsAccount.balance += amount;
-
-    // Save the changes
     await this.save();
+
     return {
       success: true,
-      newBalance: this.savingsAccount.balance,
+      newBalanceSummary: {
+        savings: this.savingsAccount.balance,
+        loan: this.loanAccount.balance,
+        group: this.groupAccount.balance
+      },
       contribution: contributionRecord
     };
   } catch (error) {
     throw error;
   }
 };
+
 
 // Method to record a cash contribution
 GroupSchema.methods.addCashContribution = async function(memberId, amount, verifiedBy, notes, reference) {
@@ -887,6 +956,48 @@ GroupSchema.methods.calculateNextDueDate = function(frequency, dueDay) {
   }
   
   return nextDate;
+};
+
+// Enhanced Group.js model methods
+
+GroupSchema.methods.assessLatePaymentFines = async function(loanId, lateFeePercentage) {
+  const loan = await Loan.findById(loanId);
+  if (!loan || loan.group.toString() !== this._id.toString()) {
+    throw new Error('Loan not found in this group');
+  }
+  
+  const today = new Date();
+  let totalFines = 0;
+  
+  // Check for late payments
+  loan.repaymentSchedule.forEach(installment => {
+    if (!installment.paid && installment.dueDate < today && installment.lateFee === 0) {
+      const lateAmount = installment.totalAmount - installment.paidAmount;
+      const fine = lateAmount * (lateFeePercentage / 100);
+      installment.lateFee = fine;
+      totalFines += fine;
+    }
+  });
+  
+  if (totalFines > 0) {
+    // Add to fines account
+    this.finesAccount.balance += totalFines;
+    
+    // Record transaction
+    this.transactions.push({
+      type: 'fine_payment',
+      amount: totalFines,
+      description: `Late payment fines for loan ${loan._id}`,
+      affectedAccount: 'finesAccount',
+      status: 'completed'
+    });
+    
+    await this.save();
+  }
+  
+  await loan.save();
+  
+  return { finesAssessed: totalFines };
 };
 
 module.exports = mongoose.model('Group', GroupSchema);

@@ -48,9 +48,9 @@ const generateUserEvents = async (userId) => {
       status: { $in: ['active', 'disbursed'] }
     });
     
-    // Generate events for the next 6 months
+    // Generate events for the next 1 week
     const endDate = new Date();
-    endDate.setMonth(endDate.getMonth() + 6);
+    endDate.setMonth(endDate.getDate() - 7);
     
     // Generate group events
     for (const group of groups) {
