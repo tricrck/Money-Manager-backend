@@ -4,6 +4,7 @@ const User = require('../models/User');
 const Group = require('../models/Group');
 const Settings = require('../models/Settings');
 const deleteFromS3 = require('../middleware/s3Delete');
+const Logger = require('../middleware/Logger');
 
 const getLoanSettings = async ({ userId, groupId, loanType }) => {
   const settings = {
@@ -67,6 +68,7 @@ exports.createLoan = async (req, res) => {
     if (!user || !principalAmount || !repaymentPeriod) {
       return res.status(400).json({ message: 'Missing required fields' });
     }
+    Logger.info('Creating new loan', {userId: user, groupId: group, loanType, principalAmount, repaymentPeriod });
 
     // 🧠 Load rules
     const settings = await getLoanSettings({ userId: user, groupId: group, loanType });
@@ -103,10 +105,11 @@ exports.createLoan = async (req, res) => {
 
     loan.calculateRepaymentSchedule();
     await loan.save();
+    Logger.info('Loan created successfully', { loanId: loan._id, userId: user });
 
     res.status(201).json(loan);
   } catch (error) {
-    console.error('Loan creation error:', error);
+    Logger.error('Failed to create loan', error);
     res.status(400).json({ error: error.message });
   }
 };

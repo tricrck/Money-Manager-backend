@@ -11,9 +11,12 @@ const ReportRoutes = require('./routes/ReportRoutes');
 const {stripeWebhook} = require('./controllers/paymentController');
 const SettingsRoutes = require('./routes/settingsRoutes');
 const calendarRoutes = require('./routes/calendarRoutes')
-const messageRoutes = require('./routes/MessageRoutes');
+const Logger = require('./middleware/Logger');
+const LogManager = require('./middleware/LogManager');
 
 const app = express();
+// Initialize log manager
+const logManager = new LogManager();
 
 app.post(
   "/api/payments/stripe-webhook", 
@@ -28,7 +31,7 @@ app.use(cors({
   origin: process.env.URL_ORIGIN,
   credentials: true // if you're using cookies/auth headers
 }));
-
+const messageRoutes = require('./routes/MessageRoutes')(logManager);
 app.use('/api/users', userRoutes);
 app.use('/api/loans', loanRoutes);
 app.use('/api/wallet', walletRoutes);
@@ -39,6 +42,17 @@ app.use('/api/reports', ReportRoutes);
 app.use('/api/settings', SettingsRoutes);
 app.use('/api/calender', calendarRoutes);
 app.use('/api/messages', messageRoutes);
+
+
+// Set logger to use the log manager
+Logger.logManager = logManager;
+
+// Initialize log manager
+logManager.init().then(() => {
+  Logger.info('Logger initialized successfully');
+}).catch((error) => {
+  Logger.error('Failed to initialize logger', error);
+});
 
 app.use((err, req, res, next) => {
     console.error(err.stack);

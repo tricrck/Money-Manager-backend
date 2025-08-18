@@ -3,6 +3,9 @@ const Wallet = require('../models/Wallet');
 const User = require('../models/User');
 const { validationResult } = require('express-validator');
 const { sendEmail, sendPushNotification } = require('./messagingController');
+const { repayLoan } = require('./loanController');
+const Logger = require('../middleware/Logger');
+
 
 /**
  * Contribution Controller
@@ -17,8 +20,14 @@ class ContributionController {
   async contributeFromWallet(req, res) {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      Logger.error('Contribution validation errors', { errors: errors.array() });
       return res.status(400).json({ errors: errors.array() });
     }
+    Logger.info('Processing wallet contribution', {
+      userId: req.user.id,
+      groupId: req.params.id,
+      totalAmount: req.body.totalAmount,
+    });
 
     try {
       const { totalAmount, allocations, verifiedBy } = req.body;
@@ -27,17 +36,20 @@ class ContributionController {
 
       // Validate allocations
       if (!Array.isArray(allocations) || allocations.length === 0) {
+        Logger.error('Invalid allocations provided', { allocations });
         return res.status(400).json({ message: 'Please provide valid allocations' });
       }
 
       const calculatedTotal = allocations.reduce((sum, item) => sum + item.amount, 0);
       if (!totalAmount || totalAmount <= 0 || totalAmount !== calculatedTotal) {
+        Logger.error('Total amount does not match allocations', { totalAmount, calculatedTotal, allocations });
         return res.status(400).json({ message: 'Total amount must match sum of allocations' });
       }
 
       // Find the group
       const group = await Group.findById(groupId);
       if (!group) {
+        Logger.error('Group not found', { groupId });
         return res.status(404).json({ message: 'Group not found' });
       }
 
@@ -46,17 +58,20 @@ class ContributionController {
         member.user.toString() === userId && member.status === 'active'
       );
       if (!isMember) {
+        Logger.error('User is not an active member of the group', { userId, groupId });
         return res.status(403).json({ message: 'Access denied. Not an active member of this group' });
       }
 
       // Get user wallet
       const wallet = await Wallet.findOne({ user: userId });
       if (!wallet) {
+        Logger.error('User wallet not found', { userId });
         return res.status(404).json({ message: 'User wallet not found' });
       }
 
       // Check if wallet has sufficient funds
       if (wallet.balance < totalAmount) {
+        Logger.error('Insufficient funds in wallet', { userId, walletBalance: wallet.balance, requiredAmount: totalAmount });
         return res.status(400).json({ message: 'Insufficient funds in your wallet' });
       }
 
@@ -86,6 +101,25 @@ class ContributionController {
         allocations
       );
 
+      for (const alloc of allocations) {
+        if (alloc.account === 'loanAccount' && alloc.loanIds?.length) {
+          for (const loanId of alloc.loanIds) {
+            const fakeReq = {
+              params: { id: loanId },
+              body: { amount: alloc.amount, method: 'wallet' },
+              user: { id: userId }
+            };
+            const fakeRes = {
+              status: (code) => ({ json: (data) => console.log('RepayLoan', code, data) }),
+              json: (data) => console.log('RepayLoan', data)
+            };
+
+            await repayLoan(fakeReq, fakeRes);
+          }
+        }
+      }
+
+
       const user = await User.findById(userId);
       const message = {
         title: 'Contribution Received',
@@ -95,12 +129,18 @@ class ContributionController {
       const notificationResult = await sendPushNotification(user._id, message);
       
       if (notificationResult.success) {
-        console.log('Push notification sent successfully');
+        Logger.info('Push notification sent successfully', { userId: user._id });
       } else {
-        console.log(`Push notification failed: ${notificationResult.reason}`);
-        // Don't throw error - just log it since the main operation (contribution) succeeded
+        Logger.error('Failed to send push notification', { userId: user._id, reason: notificationResult.reason });
       }
-      // await sendEmail(user.email, message.title, message.body);
+      const emailresult = await sendEmail(user.email, message.title, message.body);
+      if (emailresult.success) {
+        Logger.info('Email sent successfully', { email: user.email });
+      }
+      else {
+        Logger.error('Email sending failed', { email: user.email, reason: emailresult.reason });
+      }
+      Logger.info('Contribution recorded successfully');
 
       res.json({
         message: 'Contribution successful',
@@ -113,7 +153,7 @@ class ContributionController {
         contribution
       });
     } catch (error) {
-      console.error('Error making wallet contribution:', error);
+      Logger.error('Error processing wallet contribution', error);
       res.status(500).json({ message: 'Server error', error: error.message });
     }
   }

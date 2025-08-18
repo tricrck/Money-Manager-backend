@@ -171,7 +171,16 @@ class GroupController {
    */
   async getMyGroups(req, res) {
     try {
-      const userId = req.user.id;
+      let userId = req.params?.userId;
+      if (!userId || userId === 'undefined') {
+        userId = req.user?.id;
+      }
+
+      console.log('Fetching groups for user:', userId);
+
+      if (!userId) {
+        return res.status(400).json({ message: 'User ID is required' });
+      }
 
       // Find groups where user is creator, admin, or member
       const groups = await Group.find({

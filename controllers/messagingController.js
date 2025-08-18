@@ -1,6 +1,7 @@
 const nodemailer = require('nodemailer');
 const admin = require("../config/firebase"); // Firebase admin SDK for push notifications
 const User = require("../models/User");
+const Logger = require('../middleware/Logger');
 
 // Create transporter using Gmail SMTP
 const transporter = nodemailer.createTransport({
@@ -22,11 +23,12 @@ const sendEmail = async (to, subject, body) => {
 
   try {
     const info = await transporter.sendMail(mailOptions);
-    console.log('Email sent successfully:', info.messageId);
-    return info;
+    Logger.info('Email sent successfully', { to, subject, messageId: info.messageId });
+    return { success: true, info };
   } catch (error) {
-    console.error('Error sending email:', error);
-    throw error;
+    Logger.error('Failed to send email', error, { to, subject });
+    // Return an object indicating failure instead of throwing
+    return { success: false, error };
   }
 };
 
@@ -55,7 +57,7 @@ exports.sendEmailController = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error in sendEmailController:', error);
+    Logger.error('Error in sendEmailController', error);
     res.status(500).json({
       success: false,
       message: 'Failed to send email',
@@ -70,8 +72,7 @@ exports.sendPushNotification = async (userId, message) => {
     const user = await User.findById(userId);
     
     if (!user || !user.pushToken || !user.notificationPreferences.push) {
-      console.log(`User ${userId} does not have a push token or push notifications disabled.`);
-      console.log(`User details: ${JSON.stringify(user)}`);
+      Logger.warn('User not found or push notifications disabled', { userId });
       return { success: false, reason: 'No valid token or notifications disabled' };
     }
 
@@ -84,17 +85,17 @@ exports.sendPushNotification = async (userId, message) => {
     };
 
     const response = await admin.messaging().send(payload);
-    console.log(`Push sent to ${user.username}: ${message.title} - ${message.body}`);
+    Logger.info('Push notification sent successfully', { userId, response });
     return { success: true, response };
     
   } catch (error) {
-    console.error("Push notification error:", error.code, error.message);
+    Logger.error('Failed to send push notification', error, { userId });
     
     // Handle specific FCM errors
     switch (error.code) {
       case 'messaging/registration-token-not-registered':
       case 'messaging/invalid-registration-token':
-        console.log(`Removing invalid token for user ${userId}`);
+        Logger.warn('Invalid push token - removing from user', { userId, error });
         await User.findByIdAndUpdate(userId, { $unset: { pushToken: 1 } });
         return { success: false, reason: 'Invalid token - removed from database' };
         
@@ -108,7 +109,7 @@ exports.sendPushNotification = async (userId, message) => {
         return { success: false, reason: 'Invalid message format' };
         
       default:
-        console.error('Unexpected push notification error:', error);
+        Logger.error('Unknown error sending push notification', error, { userId });
         return { success: false, reason: error.message };
     }
     

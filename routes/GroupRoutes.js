@@ -31,7 +31,7 @@ router.get('/', auth, GroupController.getAllGroups);
 // @route   GET /api/groups/my-groups
 // @desc    Get groups created by or involving the current user
 // @access  Private
-router.get('/my-groups', auth, GroupController.getMyGroups);
+router.get('/my-groups/:userId?', auth, GroupController.getMyGroups);
 
 // @route   GET /api/groups/public
 // @desc    Get all public groups (for discovery)
@@ -133,8 +133,7 @@ router.post(
     [
       check('totalAmount', 'Amount is required and must be positive').isFloat({ min: 0.01 }),
       check('allocations', 'Allocations must be a non-empty array').isArray({ min: 1 }),
-      check('allocations.*.account', 'Each allocation must have a valid account').isString().notEmpty(),
-      check('allocations.*.amount', 'Each allocation must have a positive amount').isFloat({ min: 0.01 })
+      check('allocations.*.account', 'Each allocation must have a valid account').isString().notEmpty()
     ]
   ],
   contributionController.contributeFromWallet
