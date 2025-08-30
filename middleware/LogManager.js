@@ -2,6 +2,7 @@ const Path = require('path')
 const fs = require('fs-extra');
 const Logger = require('./Logger')
 const DailyLog = require('./DailyLog')
+const LogModel = require('../models/Log') // Adjust path as needed
 
 const { LogLevel } = require('./constants')
 
@@ -29,10 +30,25 @@ class LogManager {
 
     /** @type {string[]} */
     this.dailyLogFiles = []
+
+    // Database logging configuration
+    this.dbLoggingEnabled = true
+    this.dbLogBuffer = []
+    this.dbBufferMaxSize = 100 // Batch insert when buffer reaches this size
+    this.dbFlushInterval = 30000 // Flush buffer every 30 seconds
+    this.dbFlushTimer = null
   }
 
   get loggerDailyLogsToKeep() {
     return global.ServerSettings?.loggerDailyLogsToKeep ?? 7;
+  }
+
+  get loggerDbLoggingEnabled() {
+    return global.ServerSettings?.loggerDbLoggingEnabled ?? true;
+  }
+
+  get loggerDbLogLevel() {
+    return global.ServerSettings?.loggerDbLogLevel ?? LogLevel.INFO;
   }
 
   async ensureLogDirs() {
@@ -40,10 +56,23 @@ class LogManager {
   }
 
   /**
+   * Initialize database logging timer
+   */
+  initDbLogging() {
+    if (!this.loggerDbLoggingEnabled) return;
+    
+    // Set up periodic buffer flush
+    this.dbFlushTimer = setInterval(() => {
+      this.flushDbBuffer()
+    }, this.dbFlushInterval);
+  }
+
+  /**
    * 1. Ensure log directories exist
    * 2. Load daily log files
    * 3. Remove old daily log files
    * 4. Create/set current daily log file
+   * 5. Initialize database logging
    */
   async init() {
     await this.ensureLogDirs()
@@ -79,6 +108,20 @@ class LogManager {
       })
       this.dailyLogBuffer = []
     }
+
+    // Initialize database logging
+    this.initDbLogging()
+  }
+
+  /**
+   * Clean up timers and flush remaining logs
+   */
+  async shutdown() {
+    if (this.dbFlushTimer) {
+      clearInterval(this.dbFlushTimer)
+      this.dbFlushTimer = null
+    }
+    await this.flushDbBuffer()
   }
 
   /**
@@ -121,6 +164,52 @@ class LogManager {
   }
 
   /**
+   * Log to database
+   * @param {LogObject} logObj 
+   */
+  async logToDatabase(logObj) {
+    if (!this.loggerDbLoggingEnabled || logObj.level < this.loggerDbLogLevel) {
+      return
+    }
+
+    try {
+      // Add to buffer for batch processing
+      this.dbLogBuffer.push({
+        ...logObj,
+        date: new Date(logObj.timestamp)
+      })
+
+      // Flush if buffer is full
+      if (this.dbLogBuffer.length >= this.dbBufferMaxSize) {
+        await this.flushDbBuffer()
+      }
+    } catch (error) {
+      console.error('[LogManager] Error adding log to database buffer:', error)
+    }
+  }
+
+  /**
+   * Flush database buffer
+   */
+  async flushDbBuffer() {
+    if (this.dbLogBuffer.length === 0) return
+
+    try {
+      const logsToInsert = [...this.dbLogBuffer]
+      this.dbLogBuffer = []
+
+      // Batch insert logs
+      await LogModel.insertMany(logsToInsert, { ordered: false })
+      
+      console.debug(`[LogManager] Flushed ${logsToInsert.length} logs to database`)
+    } catch (error) {
+      console.error('[LogManager] Error flushing logs to database:', error)
+      // In case of error, we could choose to re-add to buffer or discard
+      // For now, we'll discard to prevent infinite growth
+    }
+  }
+
+  /**
    * 
    * @param {LogObject} logObj 
    */
@@ -129,6 +218,11 @@ class LogManager {
     if (logObj.level === LogLevel.FATAL) {
       await this.logCrashToFile(logObj)
     }
+
+    // Log to database (non-blocking)
+    this.logToDatabase(logObj).catch(error => {
+      console.error('[LogManager] Database logging failed:', error)
+    })
 
     // Buffer when logging before daily logs have been initialized
     if (!this.currentDailyLog) {
@@ -171,6 +265,80 @@ class LogManager {
    */
   getMostRecentCurrentDailyLogs() {
     return this.currentDailyLog?.logs.slice(-5000) || ''
+  }
+
+  /**
+   * Get logs from database
+   * @param {Object} options Query options
+   * @param {string} options.level Log level filter
+   * @param {string} options.source Source filter
+   * @param {Date} options.startDate Start date filter
+   * @param {Date} options.endDate End date filter
+   * @param {number} options.limit Limit results (default: 500)
+   * @returns {Promise<Array>}
+   */
+  async getLogsFromDatabase(options = {}) {
+    if (!this.loggerDbLoggingEnabled) {
+      return []
+    }
+
+    try {
+      const { level, source, startDate, endDate, limit = 500 } = options
+      
+      if (startDate && endDate) {
+        return await LogModel.findByDateRange(startDate, endDate, limit)
+      } else if (level) {
+        return await LogModel.findByLevel(level, limit)
+      } else if (source) {
+        return await LogModel.findBySource(source, limit)
+      } else {
+        return await LogModel.findRecentLogs(limit)
+      }
+    } catch (error) {
+      console.error('[LogManager] Error querying logs from database:', error)
+      return []
+    }
+  }
+
+  /**
+   * Get error and fatal logs from database
+   * @param {number} limit 
+   * @returns {Promise<Array>}
+   */
+  async getErrorLogsFromDatabase(limit = 100) {
+    if (!this.loggerDbLoggingEnabled) {
+      return []
+    }
+
+    try {
+      return await LogModel.findErrorsAndFatals(limit)
+    } catch (error) {
+      console.error('[LogManager] Error querying error logs from database:', error)
+      return []
+    }
+  }
+
+  /**
+   * Clean up old logs from database
+   * @param {number} daysToKeep Number of days to keep logs (default: 30)
+   */
+  async cleanupOldDatabaseLogs(daysToKeep = 30) {
+    if (!this.loggerDbLoggingEnabled) {
+      return
+    }
+
+    try {
+      const cutoffDate = new Date()
+      cutoffDate.setDate(cutoffDate.getDate() - daysToKeep)
+
+      const result = await LogModel.deleteMany({
+        date: { $lt: cutoffDate }
+      })
+
+      console.log(`[LogManager] Cleaned up ${result.deletedCount} old database logs`)
+    } catch (error) {
+      console.error('[LogManager] Error cleaning up old database logs:', error)
+    }
   }
 }
 module.exports = LogManager

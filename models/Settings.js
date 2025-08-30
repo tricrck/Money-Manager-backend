@@ -13,6 +13,15 @@ const settingsSchema = new mongoose.Schema({
   maxLoanDuration: { type: Number, default: 12 }, // in months
   guarantorsRequired: { type: Number, default: 7 },
   
+  // Logging Settings
+  loggerDailyLogsToKeep: { type: Number, default: 7 },
+  loggerDbLoggingEnabled: { type: Boolean, default: true },
+  loggerDbLogLevel: { type: Number, default: 2 }, // INFO level
+  loggerDbLogRetentionDays: { type: Number, default: 30 },
+  loggerDbBatchSize: { type: Number, default: 100 },
+  loggerDbFlushInterval: { type: Number, default: 30000 }, // 30 seconds
+
+  
   // Notification Settings
   emailNotifications: { type: Boolean, default: true },
   smsNotifications: { type: Boolean, default: true },

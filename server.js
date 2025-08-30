@@ -13,6 +13,7 @@ const SettingsRoutes = require('./routes/settingsRoutes');
 const calendarRoutes = require('./routes/calendarRoutes')
 const Logger = require('./middleware/Logger');
 const LogManager = require('./middleware/LogManager');
+const LogRoutes = require('./routes/logRoutes');
 
 const app = express();
 // Initialize log manager
@@ -42,6 +43,7 @@ app.use('/api/reports', ReportRoutes);
 app.use('/api/settings', SettingsRoutes);
 app.use('/api/calender', calendarRoutes);
 app.use('/api/messages', messageRoutes);
+app.use('/api/logs', LogRoutes);
 
 
 // Set logger to use the log manager

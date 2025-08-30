@@ -176,8 +176,6 @@ class GroupController {
         userId = req.user?.id;
       }
 
-      console.log('Fetching groups for user:', userId);
-
       if (!userId) {
         return res.status(400).json({ message: 'User ID is required' });
       }

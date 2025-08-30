@@ -72,7 +72,8 @@ exports.registerUser = async (req, res) => {
 
 exports.uploadProfilePicture = async (req, res) => {
   try {
-    const user = await User.findById(req.params.userId);
+    const userId = req?.params?.userId;
+    const user = await User.findById(req?.params?.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
     Logger.info('Uploading profile picture', { userId });
 
@@ -141,6 +142,8 @@ exports.loginUser = async (req, res) => {
       { expiresIn: expiry }
     );
     Logger.debug('Login token generated', { userId: user._id });
+
+    console.log('User Object:', settings.twoFactorAuth);
 
     res.json({ token, user: userObject });
   } catch (error) {
