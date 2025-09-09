@@ -1,6 +1,17 @@
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 
+const SessionSchema = new mongoose.Schema({
+  deviceId: { type: String, required: true }, // Unique fingerprint
+  ip: String,
+  deviceInfo: String, // User agent / browser details
+  location: String,   // Geolocation (via IP lookup service)
+  token: String,      // JWT refresh token (hashed or encrypted)
+  createdAt: { type: Date, default: Date.now },
+  lastActive: { type: Date, default: Date.now },
+  isActive: { type: Boolean, default: true }
+});
+
 const UserSchema = new mongoose.Schema({
   // Basic information
   username: { 
@@ -41,7 +52,7 @@ const UserSchema = new mongoose.Schema({
   // User roles and groups
   role: { 
     type: String, 
-    enum: ['Member', 'Admin', 'Treasurer', 'Secretary'], 
+    enum: ['Member', 'Admin', 'Treasurer', 'Secretary', 'Chairperson', 'Support'], 
     default: 'Member' 
   },
   groups: [{ 
@@ -83,8 +94,18 @@ const UserSchema = new mongoose.Schema({
   
   // Security
   lastLogin: Date,
+  lastLoginIP: String,
+  lastLoginDevice: String,
+  lastLoginLocation: String,
   resetPasswordToken: String,
   resetPasswordExpires: Date,
+
+  // Presence
+  isOnline: { type: Boolean, default: false },
+  lastActive: { type: Date, default: Date.now },
+
+  // Sessions (multi-device support)
+  sessions: [SessionSchema],
   
   // Preferences
   language: { 
@@ -97,7 +118,14 @@ const UserSchema = new mongoose.Schema({
     email: { type: Boolean, default: true },
     push: { type: Boolean, default: true }
   },
-  pushToken: { type: String, default: null }
+  pushToken: { type: String, default: null },
+  otp: {
+    code: { type: String },
+    expiresAt: { type: Date },
+    attempts: { type: Number, default: 0 },
+    maxAttempts: { type: Number, default: 5 },
+    lastSentAt: { type: Date }
+  }
 }, { timestamps: true });
 
 

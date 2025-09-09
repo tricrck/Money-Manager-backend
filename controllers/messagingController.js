@@ -2,6 +2,7 @@ const nodemailer = require('nodemailer');
 const admin = require("../config/firebase"); // Firebase admin SDK for push notifications
 const User = require("../models/User");
 const Logger = require('../middleware/Logger');
+const axios = require('axios');
 
 // Create transporter using Gmail SMTP
 const transporter = nodemailer.createTransport({
@@ -118,4 +119,93 @@ exports.sendPushNotification = async (userId, message) => {
   }
 };
 
+const formatToE164 = (phone) => {
+  // Strip non-digits
+  let cleaned = phone.replace(/\D/g, '');
+
+  // If already starts with country code
+  if (cleaned.startsWith('254')) {
+    return `+${cleaned}`;
+  }
+
+  // If starts with 0, replace with +254
+  if (cleaned.startsWith('0')) {
+    return `+254${cleaned.slice(1)}`;
+  }
+
+  throw new Error('Invalid phone number format');
+};
+
+// Function to send SMS via httpsms.com
+const sendSMS = async (to, content) => {
+  try {
+    const formattedTo = formatToE164(to);
+
+    const response = await axios.post(
+      'https://api.httpsms.com/v1/messages/send',
+      {
+        content,
+        to: formattedTo,
+        from: process.env.HTTPSMS_FROM || '+25475550100' // ✅ required
+      },
+      {
+        headers: {
+          'x-api-key': process.env.HTTPSMS_API_KEY,
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    return { success: true, data: response.data };
+  } catch (error) {
+    Logger.error(
+      'Failed to send SMS',
+      error.response ? error.response.data : error.message,
+      { to, content }
+    );
+    return {
+      success: false,
+      error: error.response ? error.response.data : error.message
+    };
+  }
+};
+
+// Controller for handling SMS send requests
+exports.sendSMSController = async (req, res) => {
+  try {
+    const { to, content } = req.body;
+
+    if (!to || !content) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: to and content are required'
+      });
+    }
+
+    const result = await sendSMS(to, content);
+
+    if (result.success) {
+      res.status(200).json({
+        success: true,
+        message: 'SMS sent successfully',
+        data: result.data
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        message: 'Failed to send SMS',
+        error: result.error
+      });
+    }
+  } catch (error) {
+    Logger.error('Error in sendSMSController', error);
+    res.status(500).json({
+      success: false,
+      message: 'Unexpected error while sending SMS',
+      error: error.message
+    });
+  }
+};
+exports.sendSMS = sendSMS;
 exports.sendEmail = sendEmail;

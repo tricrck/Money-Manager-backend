@@ -90,7 +90,7 @@ router.post('/user/:userId/statement',
     (req, res, next) => {
       const requestedUserId = req.params.userId;
       const currentUserId = req.user.id;
-      const isAdminUser = req.user.role === 'admin' || req.user.isAdmin;
+      const isAdminUser = req.user.role === 'Admin' || req.user.isAdmin;
       
       // Users can only access their own statements unless they're admin
       if (!isAdminUser && requestedUserId !== currentUserId) {
@@ -278,7 +278,7 @@ router.get('/export/user/:userId/transactions',
     (req, res, next) => {
       const requestedUserId = req.params.userId;
       const currentUserId = req.user.id;
-      const isAdminUser = req.user.role === 'admin' || req.user.isAdmin;
+      const isAdminUser = req.user.role === 'Admin' || req.user.isAdmin;
       
       if (!isAdminUser && requestedUserId !== currentUserId) {
         return res.status(403).json({ 

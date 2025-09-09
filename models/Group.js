@@ -1,4 +1,8 @@
 const mongoose = require('mongoose');
+const GroupTypePolicies = require('../controllers/GroupTypePolicies.js');
+const { ChamaDataSchema, SaccoDataSchema, TableBankingDataSchema, InvestmentClubDataSchema } = require('./Policies.js');
+const Wallet = require('./Wallet');
+const Logger = require('../middleware/Logger.js');
 
 const GroupSchema = new mongoose.Schema({
     name: {
@@ -148,6 +152,12 @@ const GroupSchema = new mongoose.Schema({
       enum: ['public', 'private', 'invite_only'],
       default: 'private'
     },
+    // Group-type specific data
+    chamaData: ChamaDataSchema,
+    saccoData: SaccoDataSchema,
+    tableBankingData: TableBankingDataSchema,
+    investmentClubData: InvestmentClubDataSchema,
+    // Common financial accounts for the group
     groupAccount: {
       balance: {
         type: Number,
@@ -202,7 +212,7 @@ const GroupSchema = new mongoose.Schema({
     transactions: [{
       type: {
         type: String,
-        enum: ['contribution', 'loan_disbursement', 'loan_repayment', 'interest_payment', 'fine_payment', 'expense', 'dividend'],
+        enum: ['contribution', 'loan_disbursement', 'loan_repayment', 'interest_payment', 'fine_payment', 'expense', 'dividend', 'wallet_funding'],
         required: true
       },
       amount: {
@@ -290,7 +300,11 @@ const GroupSchema = new mongoose.Schema({
         },
         dayOfWeek: Number, // 0 = Sunday, 6 = Saturday
         dayOfMonth: Number,
-        time: String // e.g. "18:00"
+        time: String, // e.g. "18:00"
+        venue: {
+          type: String,
+          default: 'Office'
+        }
       }
     },
     isActive: {
@@ -299,6 +313,212 @@ const GroupSchema = new mongoose.Schema({
     }
   }, { timestamps: true });
 
+GroupSchema.methods.initializeTypeData = async function() {
+  const policies = GroupTypePolicies.getPolicies(this.groupType);
+  
+  switch (this.groupType) {
+    case 'chama':
+      if (!this.chamaData || Object.keys(this.chamaData).length === 0) {
+        this.chamaData = {
+          currentCycle: 1,
+          currentRecipientIndex: 0,
+          cycleHistory: [],
+          payoutOrder: this.members.map((member, index) => ({
+            memberId: member.user,
+            position: index + 1,
+            hasPaidOut: false
+          })),
+          cycleSettings: {
+            shuffleOrder: false,
+            allowEmergencyPayouts: policies.allowEmergencyPayouts || false,
+            penaltyAmount: policies.penaltyForMissedContribution || 500
+          }
+        };
+      }
+      break;
+      
+    case 'sacco':
+      if (!this.saccoData || Object.keys(this.saccoData).length === 0) {
+        this.saccoData = {
+          shareCapitalAccount: {
+            balance: 0,
+            currency: 'KES',
+            totalShares: 0,
+            shareValue: policies.minShareValue || 100
+          },
+          dividendAccount: {
+            balance: 0,
+            currency: 'KES',
+            lastDividendRate: 0
+          },
+          statutoryReserveAccount: {
+            balance: 0,
+            currency: 'KES'
+          },
+          members: [],
+          boardOfDirectors: [],
+          auditHistory: []
+        };
+      }
+      break;
+      
+    case 'table_banking':
+      if (!this.tableBankingData || Object.keys(this.tableBankingData).length === 0) {
+        this.tableBankingData = {
+          meetingHistory: [],
+          socialRules: {
+            attendanceRequirement: policies.meetingAttendanceRequired || 0.8,
+            penaltyForAbsence: policies.penaltyForMissedMeeting || 200,
+            maxConsecutiveAbsences: 2,
+            latePaymentPenalty: policies.penaltyForLatePayment || 0.05
+          },
+          currentMeeting: {
+            fundsAvailable: 0,
+            lendingInProgress: false,
+            currentRound: 0
+          }
+        };
+      }
+      break;
+      
+    case 'investment_club':
+      if (!this.investmentClubData || Object.keys(this.investmentClubData).length === 0) {
+        this.investmentClubData = {
+          investmentAccount: {
+            balance: 0,
+            currency: 'KES'
+          },
+          portfolio: [],
+          investmentCommittee: [],
+          performanceHistory: [],
+          investmentStrategy: {
+            riskTolerance: 'moderate',
+            diversificationRules: {
+              maxSingleInvestment: policies.maxSingleInvestmentRatio || 0.25,
+              minInvestmentTypes: 3
+            },
+            targetReturns: {
+              annualTarget: 12,
+              benchmarkIndex: 'NSE20'
+            }
+          },
+          managementFeeAccount: {
+            balance: 0,
+            currency: 'KES',
+            feeRate: policies.managementFee || 0.02
+          }
+        };
+      }
+      break;
+  }
+  
+  await this.save();
+  return this;
+};
+
+// Pre-save middleware to initialize group-type-specific data
+GroupSchema.pre('save', async function(next) {
+  if (this.isNew) {
+    const policies = GroupTypePolicies.getPolicies(this.groupType);
+    
+    // Initialize group-type-specific data structures
+    switch (this.groupType) {
+      case 'chama':
+        this.chamaData = {
+          currentCycle: 1,
+          currentRecipientIndex: 0,
+          cycleHistory: [],
+          payoutOrder: this.members.map((member, index) => ({
+            memberId: member.user,
+            position: index + 1,
+            hasPaidOut: false
+          })),
+          cycleSettings: {
+            shuffleOrder: false,
+            allowEmergencyPayouts: policies.allowEmergencyPayouts,
+            penaltyAmount: policies.penaltyForMissedContribution
+          }
+        };
+        break;
+        
+      case 'sacco':
+        this.saccoData = {
+          shareCapitalAccount: {
+            balance: 0,
+            currency: 'KES',
+            totalShares: 0,
+            shareValue: policies.minShareValue || 100
+          },
+          dividendAccount: {
+            balance: 0,
+            currency: 'KES',
+            lastDividendRate: 0
+          },
+          statutoryReserveAccount: {
+            balance: 0,
+            currency: 'KES'
+          },
+          members: [],
+          boardOfDirectors: [],
+          auditHistory: []
+        };
+        break;
+        
+      case 'table_banking':
+        this.tableBankingData = {
+          meetingHistory: [],
+          socialRules: {
+            attendanceRequirement: policies.meetingAttendanceRequired || 0.8,
+            penaltyForAbsence: policies.penaltyForMissedMeeting || 200,
+            maxConsecutiveAbsences: 2,
+            latePaymentPenalty: policies.penaltyForLatePayment || 0.05
+          },
+          currentMeeting: {
+            fundsAvailable: 0,
+            lendingInProgress: false,
+            currentRound: 0
+          }
+        };
+        break;
+        
+      case 'investment_club':
+        this.investmentClubData = {
+          investmentAccount: {
+            balance: 0,
+            currency: 'KES'
+          },
+          portfolio: [],
+          investmentCommittee: [],
+          performanceHistory: [],
+          investmentStrategy: {
+            riskTolerance: 'moderate',
+            diversificationRules: {
+              maxSingleInvestment: policies.maxSingleInvestmentRatio || 0.25,
+              minInvestmentTypes: 3
+            },
+            targetReturns: {
+              annualTarget: 12, // 12% annual target
+              benchmarkIndex: 'NSE20'
+            }
+          },
+          managementFeeAccount: {
+            balance: 0,
+            currency: 'KES',
+            feeRate: policies.managementFee || 0.02
+          }
+        };
+        break;
+    }
+    
+    // Set default loan settings based on group type
+    this.settings.loanSettings = {
+      ...this.settings.loanSettings,
+      ...policies.loanEligibility
+    };
+  }
+  
+  next();
+});
 
 // Method  to Process Group internal transfers
 GroupSchema.methods.processTransfer = async function(fromAccountType, toAccountType, amount, verifiedBy) {
@@ -349,19 +569,31 @@ GroupSchema.methods.processTransfer = async function(fromAccountType, toAccountT
 // Method to add a contribution from a member's wallet
 GroupSchema.methods.addWalletContribution = async function(memberId, totalAmount, verifiedBy, allocations) {
   try {
+    const policies = GroupTypePolicies.getPolicies(this.groupType);
+    
+    // Validate contribution against group policies
+    const validation = GroupTypePolicies.validateOperation(this.groupType, 'contribution', {
+      amount: totalAmount,
+      expectedAmount: this.settings.contributionSchedule.amount,
+      standardAmount: this.settings.contributionSchedule.amount,
+      allowPartial: policies.allowPartialContributions
+    });
+    
+    if (!validation.valid) {
+      throw new Error(validation.validations[0].message);
+    }
+    
     const memberIndex = this.members.findIndex(m => m.user.toString() === memberId);
     if (memberIndex === -1) throw new Error('Member not found in this group');
 
+    // Process allocations
     let totalAllocated = 0;
-
     for (const alloc of allocations) {
       const { account, amount } = alloc;
       if (!this[account]) throw new Error(`Invalid account specified: ${account}`);
-
       this[account].balance += amount;
       totalAllocated += amount;
 
-      // Add to group transactions
       this.transactions.push({
         type: 'contribution',
         amount,
@@ -386,7 +618,8 @@ GroupSchema.methods.addWalletContribution = async function(memberId, totalAmount
       method: 'wallet',
       verifiedBy,
       notes: JSON.stringify(allocations),
-      status: 'verified'
+      status: 'verified',
+      allocations
     };
 
     if (!this.members[memberIndex].contributions) {
@@ -395,6 +628,26 @@ GroupSchema.methods.addWalletContribution = async function(memberId, totalAmount
 
     this.members[memberIndex].contributions.history.push(contributionRecord);
     this.members[memberIndex].contributions.total += totalAmount;
+
+    // Apply group-type-specific business logic
+    const businessLogic = GroupTypePolicies.applyBusinessLogic(
+      this.groupType, 
+      'contribution', 
+      this, 
+      { memberId, amount: totalAmount }
+    );
+
+    let additionalResults = {};
+    
+    // Handle Chama payout logic
+    // if (this.groupType === 'chama' && businessLogic?.action === 'payout') {
+    //   additionalResults = await this.processChamaPayout(businessLogic);
+    // }
+    
+    // Handle SACCO dividend calculations
+    if (this.groupType === 'sacco') {
+      additionalResults = await this.updateSaccoMemberData(memberId, totalAmount);
+    }
 
     await this.save();
 
@@ -405,12 +658,14 @@ GroupSchema.methods.addWalletContribution = async function(memberId, totalAmount
         loan: this.loanAccount.balance,
         group: this.groupAccount.balance
       },
-      contribution: contributionRecord
+      contribution: contributionRecord,
+      ...additionalResults
     };
   } catch (error) {
     throw error;
   }
 };
+
 
 
 // Method to record a cash contribution
@@ -527,73 +782,119 @@ GroupSchema.methods.addMobileMoneyContribution = async function(memberId, amount
   }
 };
 // Inside GroupSchema.methods
-GroupSchema.methods.fundWallet = async function(userId, amount, initiatedBy, account = 'savingsAccount', description = 'Wallet funding') {
-  if (!['savingsAccount', 'loanAccount', 'interestEarnedAccount', 'finesAccount'].includes(account)) {
-    throw new Error('Invalid source account');
+GroupSchema.methods.fundWallet = async function(userId, amount, initiatedBy, account, description = 'Wallet funding', session = null) {
+   try {
+    // Validate account
+    if (!['savingsAccount', 'loanAccount', 'interestEarnedAccount', 'finesAccount', 'groupAccount'].includes(account)) {
+      throw new Error('Invalid source account');
+    }
+
+    // Check group balance
+    if (this[account].balance < amount) {
+      throw new Error(`Insufficient balance in ${account}`);
+    }
+
+    // Find user's wallet
+    let wallet = await Wallet.findOne({ user: userId });
+    if (!wallet) {
+      // Create wallet if it doesn't exist
+      wallet = new Wallet({ user: userId });
+      await wallet.save();
+    }
+
+    Logger.info(`Funding wallet for user ${userId} from group ${this._id} account ${account} by ${initiatedBy}`);
+
+    // Update user's wallet (add funds)
+    await wallet.receiveFundsFromGroup(amount, this._id, description, session);
+
+    Logger.info(`Wallet funded. New wallet balance: ${wallet.balance}`);
+
+    // Deduct from group account
+    this[account].balance -= amount;
+
+    // Add transaction record to group
+    this.transactions.push({
+      type: 'wallet_funding',
+      amount,
+      date: Date.now(),
+      member: userId,
+      method: 'wallet',
+      description,
+      verifiedBy: initiatedBy,
+      affectedAccount: account,
+      status: 'completed'
+    });
+
+    // Save group changes
+    await this.save();
+    return {
+      success: true,
+      groupAccountBalance: this[account].balance,
+      userWalletBalance: wallet.balance
+    };
+
+  } catch (error) {
+    // Rollback on error
+    throw error;
   }
-
-  if (this[account].balance < amount) {
-    throw new Error(`Insufficient balance in ${account}`);
-  }
-
-  // Deduct from group account
-  this[account].balance -= amount;
-
-  // Add transaction record
-  this.transactions.push({
-    type: 'dividend', // or 'wallet_funding' if added to enum
-    amount,
-    date: Date.now(),
-    member: userId,
-    method: 'wallet',
-    description,
-    verifiedBy: initiatedBy,
-    affectedAccount: account,
-    status: 'completed'
-  });
-
-  // Save group changes
-  await this.save();
-  return {
-    groupAccountBalance: this[account].balance
-  };
 };
 
-GroupSchema.methods.recordCashPayment = async function(userId, amount, verifiedBy, notes = '', account = 'savingsAccount') {
-  // 1. Validate account
-  if (!['savingsAccount', 'loanAccount', 'interestEarnedAccount', 'finesAccount'].includes(account)) {
-    throw new Error('Invalid account specified');
+GroupSchema.methods.recordCashPayment = async function(userId, amount, verifiedBy, notes = '', account) {
+  session.startTransaction();
+
+  try {
+    // Validate account
+    if (!['savingsAccount', 'loanAccount', 'interestEarnedAccount', 'finesAccount', 'groupAccount'].includes(account)) {
+      throw new Error('Invalid account specified');
+    }
+
+    // Check group balance
+    if (this[account].balance < amount) {
+      throw new Error(`Insufficient funds in ${account}`);
+    }
+
+    // Find or create user's wallet
+    let wallet = await Wallet.findOne({ user: userId }).session(session);
+    if (!wallet) {
+      wallet = new Wallet({ user: userId });
+      await wallet.save({ session });
+    }
+
+    // Add funds to user's wallet
+    await wallet.receiveFundsFromGroup(amount, this._id, notes || 'Cash payment from group');
+
+    // Deduct from group account
+    this[account].balance -= amount;
+
+    // Record transaction in group
+    this.transactions.push({
+      type: 'expense',
+      amount,
+      date: Date.now(),
+      member: userId,
+      method: 'cash',
+      description: notes || 'Cash payment to member wallet',
+      verifiedBy,
+      affectedAccount: account,
+      status: 'completed'
+    });
+
+    await this.save({ session });
+    await session.commitTransaction();
+
+    return {
+      success: true,
+      newGroupBalance: this[account].balance,
+      newWalletBalance: wallet.balance
+    };
+
+  } catch (error) {
+    await session.abortTransaction();
+    throw error;
+  } finally {
+    session.endSession();
   }
-
-  // 2. Check group balance
-  if (this[account].balance < amount) {
-    throw new Error(`Insufficient funds in ${account}`);
-  }
-
-  // 3. Deduct from group account
-  this[account].balance -= amount;
-
-  // 4. Record transaction
-  this.transactions.push({
-    type: 'expense', // or use 'cash_payment' if added to enum
-    amount,
-    date: Date.now(),
-    member: userId,
-    method: 'cash',
-    description: notes || 'Cash payment to member',
-    verifiedBy,
-    affectedAccount: account,
-    status: 'completed'
-  });
-
-  await this.save();
-
-  return {
-    success: true,
-    newGroupBalance: this[account].balance
-  };
 };
-
 // Method to get member contribution summary
 GroupSchema.methods.getMemberContributionSummary = function(memberId) {
   // Find the member in the group
@@ -998,6 +1299,241 @@ GroupSchema.methods.assessLatePaymentFines = async function(loanId, lateFeePerce
   await loan.save();
   
   return { finesAssessed: totalFines };
+};
+
+// SACCO-specific member data updates
+GroupSchema.methods.updateSaccoMemberData = async function(memberId, contributionAmount) {
+  if (!this.saccoData.members) {
+    this.saccoData.members = [];
+  }
+  
+  let saccoMember = this.saccoData.members.find(m => m.user.toString() === memberId.toString());
+  if (!saccoMember) {
+    const memberNumber = `SACCO${String(this.saccoData.members.length + 1).padStart(4, '0')}`;
+    saccoMember = {
+      user: memberId,
+      memberNumber,
+      sharesPurchased: 0,
+      dividendsEarned: 0,
+      accountType: 'BOSA'
+    };
+    this.saccoData.members.push(saccoMember);
+  }
+  
+  return {
+    saccoMemberUpdated: true,
+    memberNumber: saccoMember.memberNumber,
+    accountType: saccoMember.accountType
+  };
+};
+
+// Table Banking meeting methods
+GroupSchema.methods.startTableBankingMeeting = async function(chairpersonId) {
+  if (this.groupType !== 'table_banking') {
+    throw new Error('This method is only available for table banking groups');
+  }
+  
+  const meetingNumber = this.tableBankingData.meetingHistory.length + 1;
+  const availableFunds = this.savingsAccount.balance;
+  
+  const newMeeting = {
+    meetingNumber,
+    date: new Date(),
+    attendance: [],
+    lendingRounds: [],
+    totalFundsAvailable: availableFunds,
+    totalLent: 0,
+    chairperson: chairpersonId
+  };
+  
+  this.tableBankingData.currentMeeting = {
+    fundsAvailable: availableFunds,
+    lendingInProgress: true,
+    currentRound: 1
+  };
+  
+  this.tableBankingData.meetingHistory.push(newMeeting);
+  await this.save();
+  
+  return {
+    meetingStarted: true,
+    meetingNumber,
+    availableFunds,
+    chairperson: chairpersonId
+  };
+};
+
+// Investment Club portfolio management
+GroupSchema.methods.addInvestment = async function(investmentData, initiatedBy) {
+  if (this.groupType !== 'investment_club') {
+    throw new Error('This method is only available for investment clubs');
+  }
+  
+  const policies = GroupTypePolicies.getPolicies(this.groupType);
+  const maxInvestment = this.investmentClubData.investmentAccount.balance * policies.maxSingleInvestmentRatio;
+  
+  if (investmentData.amount > maxInvestment) {
+    throw new Error(`Investment amount exceeds maximum allowed: ${maxInvestment}`);
+  }
+  
+  // Deduct from investment account
+  this.investmentClubData.investmentAccount.balance -= investmentData.amount;
+  
+  // Add to portfolio
+  this.investmentClubData.portfolio.push({
+    ...investmentData,
+    purchaseDate: new Date(),
+    currentValue: investmentData.amount
+  });
+  
+  // Record transaction
+  this.transactions.push({
+    type: 'expense',
+    amount: investmentData.amount,
+    date: new Date(),
+    method: 'wallet',
+    description: `Investment in ${investmentData.investmentType}`,
+    verifiedBy: initiatedBy,
+    affectedAccount: 'investmentAccount',
+    status: 'completed'
+  });
+  
+  await this.save();
+  
+  return {
+    investmentAdded: true,
+    portfolioValue: this.investmentClubData.portfolio.reduce((sum, inv) => sum + inv.currentValue, 0),
+    remainingFunds: this.investmentClubData.investmentAccount.balance
+  };
+};
+
+// Policy validation method
+GroupSchema.methods.validateOperationPolicy = function(operation, params) {
+  return GroupTypePolicies.validateOperation(this.groupType, operation, params);
+};
+GroupSchema.methods.syncSaccoMembers = async function() {
+  if (this.groupType !== 'sacco') return;
+
+  // Ensure saccoData exists
+  if (!this.saccoData) {
+    await this.initializeTypeData();
+  }
+
+  if (!Array.isArray(this.saccoData.members)) {
+    this.saccoData.members = [];
+  }
+
+  // Add any group members who aren't in saccoData.members
+  for (const member of this.members) {
+    if (member.status === 'active') {
+      const existingSaccoMember = this.saccoData.members.find(sm => 
+        sm.user.toString() === member.user.toString()
+      );
+      if (!existingSaccoMember) {
+        const memberNumber = `SACCO${String(this.saccoData.members.length + 1).padStart(4, '0')}`;
+        this.saccoData.members.push({
+          user: member.user,
+          memberNumber,
+          sharesPurchased: 0,
+          dividendsEarned: 0,
+          accountType: 'BOSA',
+          shareCapitalBalance: 0,
+          savingsBalance: 0,
+          loanBalance: 0,
+          joinedDate: member.joinedDate || new Date()
+        });
+      }
+    }
+  }
+
+  await this.save();
+};
+
+// Method to calculate and distribute dividends
+GroupSchema.methods.distributeSaccoDividends = async function(dividendRate, initiatedBy) {
+  if (this.groupType !== 'sacco') {
+    throw new Error('This method is only available for SACCO groups');
+  }
+
+  const totalDividends = this.saccoData.shareCapitalAccount.balance * (dividendRate / 100);
+  
+  if (this.savingsAccount.balance < totalDividends) {
+    throw new Error('Insufficient funds for dividend distribution');
+  }
+
+  let distributedAmount = 0;
+
+  for (const member of this.saccoData.members) {
+    if (member.sharesPurchased > 0) {
+      const memberDividend = member.shareCapitalBalance * (dividendRate / 100);
+      member.dividendsEarned = (member.dividendsEarned || 0) + memberDividend;
+      distributedAmount += memberDividend;
+
+      // Record dividend transaction
+      this.transactions.push({
+        type: 'dividend',
+        amount: memberDividend,
+        date: new Date(),
+        member: member.user,
+        method: 'wallet',
+        description: `Dividend payment at ${dividendRate}% rate`,
+        verifiedBy: initiatedBy,
+        affectedAccount: 'dividendAccount',
+        status: 'completed'
+      });
+    }
+  }
+
+  // Update accounts
+  this.savingsAccount.balance -= distributedAmount;
+  this.saccoData.dividendAccount.balance += distributedAmount;
+  this.saccoData.dividendAccount.lastDividendRate = dividendRate;
+
+  await this.save();
+
+  return {
+    dividendRate,
+    totalDistributed: distributedAmount,
+    membersReceived: this.saccoData.members.filter(m => m.sharesPurchased > 0).length
+  };
+};
+
+// Method to get SACCO member statement
+GroupSchema.methods.getSaccoMemberStatement = function(userId) {
+  if (this.groupType !== 'sacco') {
+    throw new Error('This method is only available for SACCO groups');
+  }
+
+  const saccoMember = this.saccoData.members.find(m => 
+    m.user.toString() === userId.toString()
+  );
+
+  if (!saccoMember) {
+    throw new Error('SACCO member record not found');
+  }
+
+  // Get member's transactions
+  const memberTransactions = this.transactions.filter(t => 
+    t.member && t.member.toString() === userId.toString()
+  );
+
+  return {
+    memberNumber: saccoMember.memberNumber,
+    accountType: saccoMember.accountType,
+    sharesPurchased: saccoMember.sharesPurchased,
+    shareCapitalBalance: saccoMember.shareCapitalBalance,
+    savingsBalance: saccoMember.savingsBalance,
+    dividendsEarned: saccoMember.dividendsEarned,
+    loanEligibilityAmount: saccoMember.loanEligibilityAmount,
+    votingPower: saccoMember.votingPower,
+    joinedDate: saccoMember.joinedDate,
+    lastContributionDate: saccoMember.lastContributionDate,
+    transactions: memberTransactions
+  };
+};
+// Get group-specific policies
+GroupSchema.methods.getPolicies = function() {
+  return GroupTypePolicies.getPolicies(this.groupType);
 };
 
 module.exports = mongoose.model('Group', GroupSchema);

@@ -541,6 +541,11 @@ class GroupController {
         .populate('invitations.invitedBy', 'name email username')
         .populate('joinRequests.requestedBy', 'name email username')
         .populate('joinRequests.reviewedBy', 'name email username');
+      await group.initializeTypeData();
+      if (group.groupType === 'sacco'){
+        await group.syncSaccoMembers();
+      }
+      
 
       if (!group) {
         return res.status(404).json({ message: 'Group not found' });

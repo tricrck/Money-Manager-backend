@@ -31,7 +31,9 @@ router.get('/', auth, GroupController.getAllGroups);
 // @route   GET /api/groups/my-groups
 // @desc    Get groups created by or involving the current user
 // @access  Private
-router.get('/my-groups/:userId?', auth, GroupController.getMyGroups);
+router.get('/my-groups', auth, GroupController.getMyGroups);       // current user
+router.get('/my-groups/:userId', auth, GroupController.getMyGroups); // specific user
+
 
 // @route   GET /api/groups/public
 // @desc    Get all public groups (for discovery)
