@@ -13,13 +13,13 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-const sendEmail = async (to, subject, body) => {
+const sendEmail = async (to, subject, body, isHtml = false, extraOptions = {}) => {
   const mailOptions = {
     from: process.env.GMAIL_USER, // Sender address
     to: to, // Recipient address
     subject: subject,
-    text: body, // Plain text body
-    // html: body // If you want to send HTML content instead
+     ...(isHtml ? { html: body } : { text: body }),
+    ...extraOptions
   };
 
   try {

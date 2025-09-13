@@ -46,7 +46,7 @@ passport.use(new GoogleStrategy({
         email: profile.emails[0].value,
         phoneNumber: tempPhone,
         password: crypto.randomBytes(16).toString('hex'),
-        isVerified: true,
+        isVerified: false,
         profilePicture: profile.photos?.[0]?.value || null
       });
 
@@ -90,7 +90,7 @@ passport.use(new FacebookStrategy({
         email: email || `${profile.id}@facebook.temp`,
         phoneNumber: tempPhone,
         password: crypto.randomBytes(16).toString('hex'),
-        isVerified: true,
+        isVerified: false,
         profilePicture: profile.photos?.[0]?.value || null
       });
 
@@ -136,7 +136,7 @@ passport.use(new TwitterStrategy({
             name: profile.displayName,
             phoneNumber: tempPhone,
             password: crypto.randomBytes(16).toString('hex'),
-            isVerified: true,
+            isVerified: false,
             profilePicture: profile.photos?.[0]?.value || null
           }
         },

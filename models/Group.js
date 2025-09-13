@@ -92,7 +92,7 @@ const GroupSchema = new mongoose.Schema({
       invitedUser: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
-        required: true
+        required: false
       },
       invitedBy: {
         type: mongoose.Schema.Types.ObjectId,
@@ -119,6 +119,21 @@ const GroupSchema = new mongoose.Schema({
         default: function() {
           return new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days from now
         }
+      }, // ✅ Properly closed expiresAt field
+      isExternal: {
+        type: Boolean,
+        default: false
+      },
+      invitedEmail: {
+        type: String,
+        required: function() {
+          return this.isExternal; // Required only for external invitations
+        },
+        lowercase: true
+      },
+      invitedUsername: {
+        type: String,
+        required: false // Suggested username for external users
       },
       message: String // Optional message from inviter
     }],
@@ -1414,6 +1429,13 @@ GroupSchema.methods.validateOperationPolicy = function(operation, params) {
 GroupSchema.methods.syncSaccoMembers = async function() {
   if (this.groupType !== 'sacco') return;
 
+  // Normalize user field into consistent string
+  const getUserId = (userField) => {
+    return typeof userField === 'object' && userField._id
+      ? userField._id.toString()
+      : userField.toString();
+  };
+
   // Ensure saccoData exists
   if (!this.saccoData) {
     await this.initializeTypeData();
@@ -1426,13 +1448,19 @@ GroupSchema.methods.syncSaccoMembers = async function() {
   // Add any group members who aren't in saccoData.members
   for (const member of this.members) {
     if (member.status === 'active') {
-      const existingSaccoMember = this.saccoData.members.find(sm => 
-        sm.user.toString() === member.user.toString()
+      const memberId = getUserId(member.user);
+
+      const existingSaccoMember = this.saccoData.members.find(
+        (sm) => getUserId(sm.user) === memberId
       );
+
       if (!existingSaccoMember) {
-        const memberNumber = `SACCO${String(this.saccoData.members.length + 1).padStart(4, '0')}`;
+        const memberNumber = `SACCO${String(
+          this.saccoData.members.length + 1
+        ).padStart(4, '0')}`;
+
         this.saccoData.members.push({
-          user: member.user,
+          user: memberId, // always store as plain string/ObjectId
           memberNumber,
           sharesPurchased: 0,
           dividendsEarned: 0,
@@ -1440,7 +1468,7 @@ GroupSchema.methods.syncSaccoMembers = async function() {
           shareCapitalBalance: 0,
           savingsBalance: 0,
           loanBalance: 0,
-          joinedDate: member.joinedDate || new Date()
+          joinedDate: member.joinedDate || new Date(),
         });
       }
     }

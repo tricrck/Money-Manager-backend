@@ -46,6 +46,32 @@ router.get('/public', auth, GroupController.getPublicGroups);
 router.get('/my-invitations', auth, GroupController.getMyInvitations);
 
 router.get('/my-join-requests', auth, GroupController.getUserJoinRequests);
+router.post(
+  '/accept-external-invitation/:token',
+  [
+    // No auth (public). Validate registration fields.
+    check('name', 'Name is required').not().isEmpty(),
+    check('username', 'Username is required').not().isEmpty(),
+    check('password', 'Password must be 6+ chars').isLength({ min: 6 }),
+    check('phone').optional().isString()
+  ],
+  GroupController.acceptExternalInvitation
+);
+// @route   GET /api/groups/invitation-details/:token
+// @desc    Get invitation details by token
+// @access  Public
+router.get('/invitation-details/:token', GroupController.getInvitationDetails);
+
+// @route   POST /api/groups/:id/invitations/:invitationId/resend
+// @desc    Resend invitation
+// @access  Private (admin only)
+router.post('/:id/invitations/:invitationId/resend', auth, GroupController.resendInvitation);
+
+// @route   DELETE /api/groups/:id/invitations/:invitationId
+// @desc    Cancel invitation
+// @access  Private (admin only)
+router.delete('/:id/invitations/:invitationId', auth, GroupController.cancelInvitation);
+
 
 // @route   GET /api/groups/:id
 // @desc    Get single group by ID
@@ -196,18 +222,28 @@ router.get(
 // @route   POST /api/groups/:id/invite
 // @desc    Send invitation to user by username
 // @access  Private (admin only)
+const requireEmailOrUsername = (req, res, next) => {
+  const { email, username } = req.body;
+  if (!email && !username) {
+    return res.status(400).json({ message: 'Either email or username is required' });
+  }
+  next();
+};
+
 router.post(
   '/:id/invite',
   [
     auth,
     [
-      check('username', 'Username is required').not().isEmpty(),
+      check('email').optional().isEmail().withMessage('Invalid email'),
+      check('username').optional().isString().trim(),
       check('role', 'Invalid role').optional().isIn([
         'member', 'admin', 'treasurer', 'chair', 'secretary'
       ])
-    ]
+    ],
+    requireEmailOrUsername
   ],
-  GroupController.inviteUser
+  GroupController.inviteUser.bind(GroupController)
 );
 
 // @route   POST /api/groups/:id/invitations/:invitationId/respond

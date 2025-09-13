@@ -1,7 +1,10 @@
 const Group = require('../models/Group');
 const User = require('../models/User');
 const { validationResult } = require('express-validator');
-
+const jwt = require('jsonwebtoken');
+const { sendEmail, sendPushNotification } = require('./messagingController');
+const bcrypt = require('bcryptjs');
+const Logger = require('../middleware/Logger');
 /**
  * Group Controller
  */
@@ -13,8 +16,13 @@ class GroupController {
    */
   async createGroup(req, res) {
     try {
+      Logger.info('Creating new group', { userId: req.user.id });
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
+        Logger.warn(`Group creation validation failed - User: ${req.user.id}`, { 
+          errors: errors.array(),
+          userId: req.user.id 
+        });
         return res.status(400).json({ errors: errors.array() });
       }
 
@@ -31,6 +39,10 @@ class GroupController {
       // Check if group with same name already exists
       const existingGroup = await Group.findOne({ name });
       if (existingGroup) {
+        Logger.warn(`Group creation failed - Name exists: ${name}`, { 
+          name,
+          userId: req.user.id 
+        });
         return res.status(400).json({ message: 'Group with this name already exists' });
       }
 
@@ -51,7 +63,8 @@ class GroupController {
         ]
       };
 
-      console.log("Group Data", settings)
+      Logger.debug("Group creation data", { settings, userId: req.user.id });
+
 
       // Add optional fields if provided
       if (admins && admins.length > 0) {
@@ -79,12 +92,274 @@ class GroupController {
         .populate('treasurer', 'name email')
         .populate('members.user', 'name email');
 
+      Logger.info(`Group created successfully - ID: ${group._id}`, { 
+        groupId: group._id,
+        groupName: name,
+        groupType,
+        userId: req.user.id 
+      });
+
       res.status(201).json(populatedGroup);
     } catch (error) {
-      console.error('Error creating group:', error);
+      Logger.error('Error creating group', { 
+        error: error.message,
+        stack: error.stack,
+        userId: req.user.id 
+      });
       res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
+
+  /**
+   * Get invitation details by token
+   * @route GET /api/groups/invitation-details/:token
+   * @access Public
+   */
+  async getInvitationDetails(req, res) {
+  try {
+    const { token } = req.params;
+    Logger.info('Fetching invitation details', { token: token.substring(0, 10) + '...' });
+    
+    // Verify and decode the token
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const { groupId, invitedEmail } = decoded;
+    
+    // Get group and invitation details
+    const group = await Group.findById(groupId)
+      .populate('createdBy', 'name email')
+      .select('name groupType description createdBy invitations');
+    
+    if (!group) {
+      Logger.warn('Group not found for invitation', { groupId, invitedEmail });
+      return res.status(404).json({ message: 'Group not found' });
+    }
+    
+    // Check if invitations array exists, if not initialize as empty array
+    if (!group.invitations || !Array.isArray(group.invitations)) {
+      Logger.warn('Group invitations array not found or invalid', { 
+        groupId, 
+        invitedEmail,
+        invitationsExists: !!group.invitations,
+        invitationsType: typeof group.invitations
+      });
+      return res.status(404).json({ message: 'Invalid or expired invitation' });
+    }
+    
+    // Find the invitation
+    const invitation = group.invitations.find(inv => 
+      inv.invitedEmail?.toLowerCase() === invitedEmail.toLowerCase() && 
+      inv.status === 'pending' && 
+      inv.isExternal === true
+    );
+    
+    if (!invitation) {
+      Logger.warn('Invalid or expired invitation', { 
+        groupId, 
+        invitedEmail,
+        totalInvitations: group.invitations.length,
+        pendingExternalInvitations: group.invitations.filter(inv => 
+          inv.status === 'pending' && inv.isExternal === true
+        ).length,
+        invites: group.invitations
+      });
+      return res.status(404).json({ message: 'Invalid or expired invitation' });
+    }
+    
+    // Check if invitation has expired
+    if (invitation.expiresAt && invitation.expiresAt < Date.now()) {
+      Logger.warn('Invitation has expired', { 
+        groupId, 
+        invitedEmail, 
+        expiresAt: invitation.expiresAt,
+        currentTime: Date.now()
+      });
+      return res.status(400).json({ message: 'Invitation has expired' });
+    }
+    
+    Logger.info('Invitation details fetched successfully', { 
+      groupId,
+      invitedEmail,
+      role: invitation.role 
+    });
+    
+    res.json({
+      group: {
+        name: group.name,
+        groupType: group.groupType,
+        description: group.description
+      },
+      inviter: group.createdBy,
+      role: invitation.role,
+      message: invitation.message,
+      invitedEmail: invitation.invitedEmail,
+      invitedUsername: invitation.invitedUsername,
+      expiresAt: invitation.expiresAt
+    });
+    
+  } catch (error) {
+    Logger.error('Error fetching invitation details', { 
+      error: error.message,
+      stack: error.stack,
+      token: req.params.token?.substring(0, 10) + '...'
+    });
+    
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(400).json({ message: 'Invalid invitation token' });
+    }
+    if (error.name === 'TokenExpiredError') {
+      return res.status(400).json({ message: 'Invitation token has expired' });
+    }
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+}
+
+   /**
+   * Resend invitation
+   * @route POST /api/groups/:id/invitations/:invitationId/resend
+   * @access Private (admin only)
+   */
+  async resendInvitation(req, res) {
+    try {
+      const { id: groupId, invitationId } = req.params;
+      const userId = req.user.id;
+      
+      Logger.info('Resending invitation', { 
+        groupId,
+        invitationId,
+        userId 
+      });
+      
+      const group = await Group.findById(groupId)
+        .populate('invitations.invitedBy', 'name email');
+      
+      if (!group) {
+        Logger.warn('Group not found for resend invitation', { groupId, userId });
+        return res.status(404).json({ message: 'Group not found' });
+      }
+      
+      // Check authorization
+      const isAdmin = group.admins.some(admin => admin.toString() === userId);
+      if (!isAdmin && group.createdBy.toString() !== userId) {
+        Logger.warn('Unauthorized resend invitation attempt', { 
+          groupId,
+          userId,
+          isAdmin,
+          createdBy: group.createdBy.toString() 
+        });
+        return res.status(403).json({ message: 'Access denied' });
+      }
+      
+      const invitation = group.invitations.id(invitationId);
+      if (!invitation) {
+        Logger.warn('Invitation not found for resend', { groupId, invitationId, userId });
+        return res.status(404).json({ message: 'Invitation not found' });
+      }
+      
+      if (invitation.status !== 'pending') {
+        Logger.warn('Cannot resend non-pending invitation', { 
+          groupId,
+          invitationId,
+          status: invitation.status,
+          userId 
+        });
+        return res.status(400).json({ message: 'Can only resend pending invitations' });
+      }
+      
+      // Extend expiration date
+      invitation.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      await group.save();
+      
+      // Resend email
+      const email = invitation.isExternal ? invitation.invitedEmail : invitation.invitedUser.email;
+      await this.sendInvitationEmail(email, group, invitation.invitedBy, invitation, invitation.message);
+      
+      Logger.info('Invitation resent successfully', { 
+        groupId,
+        invitationId,
+        email,
+        userId 
+      });
+      
+      res.json({ message: 'Invitation resent successfully' });
+      
+    } catch (error) {
+      Logger.error('Error resending invitation', { 
+        error: error.message,
+        stack: error.stack,
+        groupId: req.params.id,
+        invitationId: req.params.invitationId,
+        userId: req.user?.id 
+      });
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+
+  /**
+   * Cancel invitation
+   * @route DELETE /api/groups/:id/invitations/:invitationId
+   * @access Private (admin only)
+   */
+  async cancelInvitation(req, res) {
+    try {
+      const { id: groupId, invitationId } = req.params;
+      const userId = req.user.id;
+      
+      Logger.info('Cancelling invitation', { 
+        groupId,
+        invitationId,
+        userId 
+      });
+      
+      const group = await Group.findById(groupId);
+      if (!group) {
+        Logger.warn('Group not found for cancel invitation', { groupId, userId });
+        return res.status(404).json({ message: 'Group not found' });
+      }
+      
+      // Check authorization
+      const isAdmin = group.admins.some(admin => admin.toString() === userId);
+      if (!isAdmin && group.createdBy.toString() !== userId) {
+        Logger.warn('Unauthorized cancel invitation attempt', { 
+          groupId,
+          userId,
+          isAdmin,
+          createdBy: group.createdBy.toString() 
+        });
+        return res.status(403).json({ message: 'Access denied' });
+      }
+      
+      const invitation = group.invitations.id(invitationId);
+      if (!invitation) {
+        Logger.warn('Invitation not found for cancellation', { groupId, invitationId, userId });
+        return res.status(404).json({ message: 'Invitation not found' });
+      }
+      
+      // Remove invitation
+      group.invitations.pull(invitationId);
+      await group.save();
+      
+      Logger.info('Invitation cancelled successfully', { 
+        groupId,
+        invitationId,
+        userId 
+      });
+      
+      res.json({ message: 'Invitation cancelled successfully' });
+      
+    } catch (error) {
+      Logger.error('Error cancelling invitation', { 
+        error: error.message,
+        stack: error.stack,
+        groupId: req.params.id,
+        invitationId: req.params.invitationId,
+        userId: req.user?.id 
+      });
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+
+
+
 
   /**
    * Get all public groups (for discovery)
@@ -258,34 +533,98 @@ class GroupController {
    */
   async inviteUser(req, res) {
     try {
-      const { username, role = 'member', message = '' } = req.body;
+    const { email, username, role = 'member', message = '' } = req.body;
 
-      if (!username) {
-        return res.status(400).json({ message: 'Username is required' });
+    const group = await Group.findById(req.params.id);
+    if (!group) {
+      Logger.warn('Group not found for sending invitation', { groupId: req.params.id, userId: req.user.id });
+      return res.status(404).json({ message: 'Group not found' });
+    }
+
+    // Check if current user is authorized to send invites
+    const isAdmin = group.admins.some(admin => admin.toString() === req.user.id);
+    if (!isAdmin && group.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'Access denied. Only group admins can send invitations' });
+    }
+
+    // Try to find existing user by email or username
+   // Build search criteria safely (avoid calling toLowerCase() on undefined)
+    const orClauses = [];
+    if (email && typeof email === 'string' && email.trim() !== '') {
+      orClauses.push({ email: email.toLowerCase() });
+    }
+    if (username && typeof username === 'string' && username.trim() !== '') {
+       orClauses.push({ username: username.trim() });
+    }
+
+    // If for some reason no valid clause, bail out
+    if (orClauses.length === 0) {
+      Logger.warn('No valid email or username provided for invitation', { userId: req.user.id });
+      return res.status(400).json({ message: 'Invalid email or username' });
+    }
+
+    // Find invitor details 
+    let invitorUser = await User.findById(req.user.id);
+
+    // Try to find existing user by email or username
+    let invitedUser = await User.findOne({ $or: orClauses });
+
+    let isExternalUser = false;
+    
+    // If user doesn't exist, create a placeholder/pending user
+    if (!invitedUser) {
+      isExternalUser = true;
+      
+      // Check if there's already a pending external invitation for this email
+      const existingExternalInvite = group.invitations.find(inv => 
+        inv.invitedEmail?.toLowerCase() === email.toLowerCase() && 
+        inv.status === 'pending'
+      );
+      
+      if (existingExternalInvite) {
+        return res.status(400).json({ 
+          message: 'An invitation has already been sent to this email address' 
+        });
       }
 
-      // Find the user by username
-      const invitedUser = await User.findOne({ username });
-      if (!invitedUser) {
-        return res.status(404).json({ message: 'User not found' });
-      }
+      // Create external invitation without user ID
+      const invitation = {
+        invitedEmail: email.toLowerCase(),
+        invitedUsername: username || null,
+        invitedBy: req.user.id,
+        role,
+        message,
+        status: 'pending',
+        isExternal: true,
+        invitedAt: Date.now(),
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
+      };
 
-      const group = await Group.findById(req.params.id);
-      if (!group) {
-        return res.status(404).json({ message: 'Group not found' });
-      }
+      group.invitations.push(invitation);
+      await group.save();
 
-      // Check if current user is authorized to send invites
-      const isAdmin = group.admins.some(admin => admin.toString() === req.user.id);
-      if (!isAdmin && group.createdBy.toString() !== req.user.id) {
-        return res.status(403).json({ message: 'Access denied. Only group admins can send invitations' });
-      }
+      Logger.info('External invitation created successfully', { 
+        groupId: invitation,
+      });
 
-      // Send invitation
+      // Send invitation email
+      await this.sendInvitationEmail(email, group, invitorUser, invitation, message);
+
+      return res.status(201).json({
+        message: 'External invitation sent successfully',
+        invitation: {
+          ...invitation,
+          group: {
+            name: group.name,
+            description: group.description
+          }
+        }
+      });
+    } else {
+      // Existing user flow (your current logic)
       try {
         const invitation = await group.sendInvitation(invitedUser._id, req.user.id, role, message);
         
-        // Populate the invitation for response
         await group.populate('invitations.invitedUser', 'name email username');
         await group.populate('invitations.invitedBy', 'name email username');
         
@@ -295,6 +634,9 @@ class GroupController {
           inv.status === 'pending'
         );
 
+        // Send notification email to existing user
+        await this.sendInvitationEmail(invitedUser.email, group, invitorUser, populatedInvitation, message);
+
         res.status(201).json({
           message: 'Invitation sent successfully',
           invitation: populatedInvitation
@@ -302,11 +644,213 @@ class GroupController {
       } catch (inviteError) {
         return res.status(400).json({ message: inviteError.message });
       }
+    }
     } catch (error) {
       console.error('Error sending invitation:', error);
       res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
+
+  /**
+   * Send invitation email
+   */
+  async sendInvitationEmail(email, group, inviter, invitation, message) {
+    try {
+      let emailContent;
+      let invitationLink;
+
+      if (invitation.isExternal) {
+        // Create invitation token for external users
+        const token = jwt.sign(
+          { 
+            groupId: group._id, 
+            invitedEmail: email,
+            exp: Math.floor(Date.now() / 1000) + (7 * 24 * 60 * 60) // 7 days
+          },
+          process.env.JWT_SECRET
+        );
+
+        invitationLink = `${process.env.URL_ORIGIN}/register?token=${token}`;
+
+        // Mapping for display names
+        const groupTypeLabels = {
+          chama: "Chama",
+          sacco: "Sacco",
+          table_banking: "Table Banking",
+          investment_club: "Investment Club"
+        };
+
+        // Usage
+        const displayGroupType = groupTypeLabels[group.groupType] || group.groupType;
+
+        emailContent = `
+          <h2>You're invited to join ${group.name}!</h2>
+          <p>Hi there!</p>
+          <p>${inviter.name} has invited you to join the group ${group.name} on our Money Manager platform.</p>
+          ${message ? `<p><strong>Personal message:</strong> ${message}</p>` : ''}
+          <p><strong>Group Type:</strong> ${displayGroupType}</p>
+          <p><strong>Your Role:</strong> ${invitation.role}</p>
+          <p>To join this group, you'll need to create an account. Click the link below:</p>
+          <a href="${invitationLink}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Accept Invitation & Create Account</a>
+          <p>This invitation expires on ${new Date(invitation.expiresAt).toLocaleDateString()}.</p>
+          <p>If you already have an account, please login first and then use this link.</p>
+        `;
+      } else {
+        // Existing user
+        invitationLink = `${process.env.URL_ORIGIN}/groups/invitations`;
+        
+        emailContent = `
+          <h2>You're invited to join ${group.name}!</h2>
+          <p>Hi ${invitation.invitedUser.name}!</p>
+          <p>${inviter.name} has invited you to join the group "${group.name}".</p>
+          ${message ? `<p><strong>Personal message:</strong> ${message}</p>` : ''}
+          <p><strong>Group Type:</strong> ${group.groupType}</p>
+          <p><strong>Your Role:</strong> ${invitation.role}</p>
+          <p>Login to your account to accept or decline this invitation:</p>
+          <a href="${invitationLink}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">View Invitation</a>
+          <p>This invitation expires on ${new Date(invitation.expiresAt).toLocaleDateString()}.</p>
+        `;
+      }
+
+      // ✅ Use your reusable sendEmail function here
+      const subject = `Invitation to join ${group.name}`;
+      return await sendEmail(email, subject, emailContent, true);
+
+    } catch (error) {
+      console.error('Error sending invitation email:', error);
+      return { success: false, error };
+    }
+  }
+
+  /**
+   * Handle external user registration via invitation
+   * @route POST /api/groups/accept-external-invitation/:token
+   * @access Public
+   */
+  async acceptExternalInvitation(req, res) {
+    try {
+      const { token } = req.params;
+      const { name,
+        email,
+        phoneNumber,
+        password,
+        username } = req.body;
+
+      // Decode invitation token (you'll need to implement token generation)
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const { groupId, invitedEmail } = decoded;
+
+      const group = await Group.findById(groupId);
+      if (!group) {
+        return res.status(404).json({ message: 'Group not found' });
+      }
+
+      // Find the external invitation
+      const invitation = group.invitations.find(inv => 
+        inv.invitedEmail === invitedEmail && 
+        inv.status === 'pending' && 
+        inv.isExternal === true
+      );
+
+      if (!invitation) {
+        return res.status(404).json({ message: 'Invalid or expired invitation' });
+      }
+
+      // Check if invitation has expired
+      if (invitation.expiresAt < Date.now()) {
+        invitation.status = 'expired';
+        await group.save();
+        return res.status(400).json({ message: 'Invitation has expired' });
+      }
+      // Use the invited email if not provided
+      const finalEmail = email || invitation.invitedEmail;
+
+      // Check if user already exists
+      const existingUser = await User.findOne({ 
+        $or: [
+          { email: invitedEmail },
+          { username: username },
+          { phoneNumber: phoneNumber }
+        ]
+      });
+
+      if (existingUser) {
+        return res.status(400).json({ 
+          message: 'User with this email or username already exists. Please login instead.' 
+        });
+      }
+
+      // Hash password
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // Create new user
+      const user = await User.create({
+        name,
+        phoneNumber,
+        email: finalEmail,
+        username: username || invitation.invitedUsername,
+        password: hashedPassword
+      });
+
+      await user.save();
+
+      // Update invitation with new user ID
+      invitation.invitedUser = user._id;
+      invitation.status = 'accepted';
+      invitation.respondedAt = Date.now();
+      invitation.isExternal = false; // No longer external
+
+      // Add user as member to the group
+      group.members.push({
+        user: user._id,
+        role: invitation.role,
+        status: 'active',
+        joinedDate: Date.now()
+      });
+
+      // Add to admins if role is admin
+      if (invitation.role === 'admin') {
+        group.admins.push(user._id);
+      }
+
+      // Set as treasurer if role is treasurer
+      if (invitation.role === 'treasurer') {
+        group.treasurer = user._id;
+      }
+
+      await group.save();
+
+      // Generate auth token for the new user
+      const authToken = jwt.sign(
+        { user: { id: user._id } },
+        process.env.JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+
+      res.status(201).json({
+        message: 'Successfully joined the group',
+        token: authToken,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          username: user.username
+        },
+        group: {
+          id: group._id,
+          name: group.name,
+          role: invitation.role
+        }
+      });
+
+    } catch (error) {
+      console.error('Error accepting external invitation:', error);
+      if (error.name === 'JsonWebTokenError') {
+        return res.status(400).json({ message: 'Invalid invitation token' });
+      }
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+}
 
   /**
    * Accept or decline invitation

@@ -5,6 +5,7 @@ const Loan = require('../models/Loan');
 const User = require('../models/User');
 const cron = require('node-cron');
 const { sendEmail, sendPushNotification } = require('./messagingController');
+const Logger = require('../middleware/Logger');
 
 // Fine rules configuration (can be moved to a config file or database)
 const FINE_RULES = {
@@ -345,6 +346,7 @@ cron.schedule('0 * * * *', async () => {
 
 // Controller methods for routes
 const getUserEvents = async (req, res) => {
+  Logger.info('Fetching user events', { userId: req.user._id });
   try {
     const { start, end } = req.query;
     const userId = req.user._id;
