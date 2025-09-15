@@ -301,9 +301,9 @@ class ContributionController {
         sendPushNotification(user._id, message).catch(err => 
           Logger.error('Push notification failed', { userId: user._id, error: err.message })
         ),
-        // sendEmail(user.email, message.title, message.body).catch(err =>
-        //   Logger.error('Email sending failed', { email: user.email, error: err.message })
-        // )
+        sendEmail(user.email, message.title, message.body).catch(err =>
+          Logger.error('Email sending failed', { email: user.email, error: err.message })
+        )
       ]);
 
       // Prepare response data

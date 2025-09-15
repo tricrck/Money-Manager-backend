@@ -357,11 +357,6 @@ const getUserEvents = async (req, res) => {
       createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } // Last 24 hours
     });
     
-    if (recentEvents === 0) {
-      console.log(`No recent events found for user ${userId}, generating...`);
-      await generateUserEvents(userId);
-    }
-    
     // Build query
     let query = { user: userId };
     

@@ -1,12 +1,13 @@
-// controllers/chatController.js
 const asyncHandler = require('express-async-handler');
 const ChatMessage = require('../models/ChatMessage.js');
-const User = require('../models/User'); // Add this import
+const User = require('../models/User');
 const Logger = require('../middleware/Logger');
 const { v4: uuidv4 } = require('uuid');
+const AIService = require('../services/AIService'); // Import our new service
+const { sendEmail, sendPushNotification } = require('./messagingController');
 
 /**
- * @desc Send a message (user or support)
+ * @desc Enhanced Send Message with AI Integration and Groq Fallback
  * @route POST /api/chat/send
  */
 exports.sendMessage = asyncHandler(async (req, res) => {
@@ -17,57 +18,263 @@ exports.sendMessage = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error('Message content or attachment is required');
   }
-  Logger.info(`User ${req.user.role} is sending a message`, { conversationId, recipientUserId, user: req.user });
 
   const senderType = req.user.role.toLowerCase() === 'support' || req.user.role.toLowerCase() === 'admin' ? 'support' : 'user';
+  
 
-  let finalConversationId =
-    conversationId && conversationId !== 'floating-chat-default'
-      ? conversationId
-      : `conv_${uuidv4()}`;
-  Logger.info(`Using conversationId: ${finalConversationId}`, { conversationId, senderType });
+  let finalConversationId = conversationId && conversationId !== 'floating-chat-default'
+    ? conversationId
+    : `conv_${uuidv4()}`;
 
-  const message = await ChatMessage.create({
+  // AI Enhancements for user messages
+  let enhancedType = type;
+  let enhancedPriority = req.body.priority || 'medium';
+  let aiResponse = null;
+  let detectedLanguage = 'en';
+  let contentModeration = 'clean';
+  let extractedTags = [];
+  let suggestedAgent = null;
+  let issuePattern = 'normal';
+
+  if (senderType === 'user' && content) {
+    // Get user's conversation history for context
+    const userHistory = await ChatMessage.find({ 
+      user: req.user._id 
+    }).sort({ createdAt: -1 }).limit(10);
+
+    // Run AI enhancements in parallel for better performance
+    const aiPromises = [
+      AIService.classifyMessageType(content),
+      AIService.determinePriority(content, enhancedType),
+      AIService.analyzeSentiment(content),
+      AIService.detectLanguage(content),
+      AIService.moderateContent(content),
+      AIService.extractTags(content),
+      AIService.suggestAgent(content, enhancedType, enhancedPriority),
+      AIService.detectIssuePatterns(content, userHistory)
+    ];
+
+    const results = await Promise.allSettled(aiPromises);
+
+    // Extract results safely with proper error handling
+    enhancedType = results[0].status === 'fulfilled' ? results[0].value : enhancedType;
+    enhancedPriority = results[1].status === 'fulfilled' ? results[1].value : enhancedPriority;
+    const detectedSentiment = results[2].status === 'fulfilled' ? results[2].value : 'neutral';
+    detectedLanguage = results[3].status === 'fulfilled' ? results[3].value : 'en';
+    contentModeration = results[4].status === 'fulfilled' ? results[4].value : 'clean';
+    extractedTags = results[5].status === 'fulfilled' ? results[5].value : [];
+    suggestedAgent = results[6].status === 'fulfilled' ? results[6].value : 'general';
+    issuePattern = results[7].status === 'fulfilled' ? results[7].value : 'normal';
+
+    // Validate issue pattern
+    const validPatterns = ['normal', 'recurring', 'escalating', 'churn_risk'];
+    if (!validPatterns.includes(issuePattern)) {
+      issuePattern = 'normal';
+    }
+
+    // Auto-escalate based on sentiment and patterns
+    if (detectedSentiment === 'urgent' || issuePattern === 'churn_risk') {
+      enhancedPriority = 'high';
+    }
+
+
+    // Block inappropriate content
+    const validResults = ['clean', 'spam', 'inappropriate', 'threat'];
+    if (!validResults.includes(contentModeration)) {
+      contentModeration = 'clean';
+    }
+
+    const validAgents = ['technical', 'billing', 'general', 'senior'];
+    if (!validAgents.includes(suggestedAgent)) {
+      suggestedAgent = 'general';
+    }
+
+    const validPriorities = ['low', 'medium', 'high'];
+    if (!validPriorities.includes(enhancedPriority)) {
+      Logger.warn(`Invalid AI priority "${enhancedPriority}" - falling back to "medium"`);
+      enhancedPriority = 'medium';
+    }
+
+    // Sanitize type, priority, agent
+    const validTypes = ['bug_report', 'feature_request', 'question', 'support', 'user'];
+    if (!validTypes.includes(enhancedType)) {
+      Logger.warn(`Invalid AI type "${enhancedType}" - falling back to "user"`);
+      enhancedType = 'user';
+    }
+
+
+    // Generate AI auto-response for simple queries
+    if (enhancedType === 'question' || enhancedPriority === 'low') {
+      try {
+        aiResponse = await AIService.generateAutoResponse(content, enhancedType, userHistory);
+      } catch (error) {
+        Logger.warn('AI auto-response failed, continuing without it:', error.message);
+      }
+    }
+
+    Logger.info(`AI Analysis - Type: ${enhancedType}, Priority: ${enhancedPriority}, Sentiment: ${detectedSentiment}, Pattern: ${issuePattern}`);
+  }
+
+  // Create the message with AI enhancements
+  const messageData = {
     user: senderType === 'user' ? req.user._id : recipientUserId,
     conversationId: finalConversationId,
     content,
-    type: type || 'user',
+    type: enhancedType || 'user',
     senderType,
     supportAgent: senderType === 'support' ? req.user._id : null,
     attachment: attachment || null,
     status: 'sent',
-    priority: req.body.priority || 'medium',
-    conversationStatus: req.body.conversationStatus || 'open'
-  });
+    priority: enhancedPriority,
+    conversationStatus: req.body.conversationStatus || 'open',
+    // Add AI metadata
+    aiMetadata: {
+      detectedLanguage,
+      extractedTags,
+      suggestedAgent,
+      issuePattern,
+      contentModeration
+    }
+  };
+
+  const message = await ChatMessage.create(messageData);
 
   const populatedMessage = await ChatMessage.findById(message._id)
     .populate('user', 'name email')
     .populate('supportAgent', 'name email');
+  // Notifications for support/admins
+    // ---------------------------
+    if (senderType === 'user') {
+      try {
+        // Find active support/admin users
+        const targets = await User.find({
+          role: { $in: ['Support', 'Admin'] },
+          isActive: true
+        }).lean();
 
-  Logger.info(`Message sent by ${senderType} ${req.user._id} in conversation ${finalConversationId}`);
+        if (targets.length > 0) {
+          const title = `New ${enhancedPriority.toUpperCase()} ${enhancedType} from ${req.user.name || 'User'}`;
+          const snippet = (content || (attachment ? '[attachment]' : '')).toString().slice(0, 250);
+          const body = `${snippet}\n\nConversation: ${finalConversationId}\nPriority: ${enhancedPriority}\nType: ${enhancedType}`;
 
-  res.status(201).json(populatedMessage);
+          const notifyPromises = [];
+
+          targets.forEach(target => {
+            // send push for medium or high if they accept push
+            if (['medium', 'high'].includes(enhancedPriority) &&
+                target.notificationPreferences?.push &&
+                target.pushToken) {
+              // keep same shape your sendPushNotification expects (userId, payload)
+              notifyPromises.push(
+                sendPushNotification(target._id, {
+                  title,
+                  body,
+                  conversationId: finalConversationId,
+                  messageId: message._id
+                }).catch(err => {
+                  Logger.error('Push notification failed', {
+                    to: target._id,
+                    email: target.email,
+                    error: err?.message || err
+                  });
+                  // swallow so Promise.allSettled receives failure but we continue
+                  throw err;
+                })
+              );
+            }
+
+            // send email when it's a support-type message AND priority is high
+            if (['admin', 'support', 'bug_report'].includes(enhancedType) &&
+                enhancedPriority === 'high' &&
+                target.notificationPreferences?.email &&
+                target.email) {
+              notifyPromises.push(
+                sendEmail(target.email, title, body).catch(err => {
+                  Logger.error('Email sending failed', {
+                    toEmail: target.email,
+                    error: err?.message || err
+                  });
+                  throw err;
+                })
+              );
+            }
+
+            // (Optional) also record an internal audit / activity log for each target
+            // e.g. NotificationLog.create({ to: target._id, type: 'push'|'email', priority: enhancedPriority, conversationId: finalConversationId })
+          });
+
+          // Fire them in parallel and log results
+          if (notifyPromises.length > 0) {
+            const results = await Promise.allSettled(notifyPromises);
+            results.forEach((r, idx) => {
+              if (r.status === 'rejected') {
+                Logger.warn('Notification promise rejected', { index: idx, reason: r.reason?.message || r.reason });
+              }
+            });
+            Logger.info(`Dispatched ${notifyPromises.length} notification(s) for conversation ${finalConversationId}`);
+          } else {
+            Logger.info('No notification targets matched preferences for this message');
+          }
+        }
+      } catch (notifyErr) {
+        Logger.error('Notification dispatch failed:', notifyErr);
+      }
+    }
+
+  // If AI generated a response, send it immediately
+  if (aiResponse && senderType === 'user') {
+    try {
+      const aiMessage = await ChatMessage.create({
+        user: req.user._id,
+        conversationId: finalConversationId,
+        content: aiResponse,
+        type: 'support',
+        senderType: 'ai',
+        supportAgent: null, // Mark as AI response
+        status: 'sent',
+        priority: enhancedPriority,
+        conversationStatus: 'in_progress',
+        aiMetadata: {
+          isAiGenerated: true,
+          originalMessageId: message._id
+        }
+      });
+
+      Logger.info(`AI auto-response sent for conversation ${finalConversationId}`);
+    } catch (error) {
+      Logger.error('Failed to create AI response message:', error);
+    }
+  }
+
+  Logger.info(`Enhanced message sent by ${senderType} ${req.user._id} in conversation ${finalConversationId}`);
+
+  res.status(201).json({
+    ...populatedMessage.toObject(),
+    aiInsights: {
+      detectedType: enhancedType,
+      determinedPriority: enhancedPriority,
+      suggestedAgent,
+      issuePattern,
+      extractedTags,
+      hasAiResponse: !!aiResponse
+    }
+  });
 });
 
 /**
- * @desc Get messages (user or support)
+ * @desc Enhanced get messages with AI insights and conversation summary
  * @route GET /api/chat/messages
- * You can pass ?conversationId=...&page=...&limit=...
  */
 exports.getMessages = asyncHandler(async (req, res) => {
-  let { conversationId } = req.query; // use query instead of param to fit old route
+  let { conversationId } = req.query;
   const page = Number(req.query.page) || 1;
   const limit = Number(req.query.limit) || 50;
   const skip = (page - 1) * limit;
 
-  // Handle case where conversationId might be passed as a parameter
   if (!conversationId && req.params.conversationId) {
     conversationId = req.params.conversationId;
   }
 
-
-
-  // If still no conversationId and not admin/support, try to get user's conversations
   if (!conversationId) {
     const userRole = req.user.role.toLowerCase();
     let query = {};
@@ -80,18 +287,12 @@ exports.getMessages = asyncHandler(async (req, res) => {
       .populate('user', 'name email')
       .populate('supportAgent', 'name email')
       .sort({ createdAt: -1 })
-      .limit(20); // Get recent messages across all conversations
+      .limit(20);
 
-    Logger.info(`Retrieved recent messages for user ${req.user._id}`);
-    
     return res.json({
       messages,
       conversationId: null,
-      pagination: {
-        total: messages.length,
-        page: 1,
-        pages: 1,
-      },
+      pagination: { total: messages.length, page: 1, pages: 1 }
     });
   }
 
@@ -110,11 +311,20 @@ exports.getMessages = asyncHandler(async (req, res) => {
     .skip(skip)
     .limit(limit);
 
-  Logger.info(`Retrieved conversation ${conversationId} messages for user ${req.user._id}`);
+  // Generate conversation summary if requested
+  let conversationSummary = null;
+  if (req.query.includeSummary === 'true' && messages.length > 5) {
+    try {
+      conversationSummary = await AIService.summarizeConversation(messages);
+    } catch (error) {
+      Logger.warn('Failed to generate conversation summary:', error.message);
+    }
+  }
 
   res.json({
     messages,
     conversationId,
+    conversationSummary,
     pagination: {
       total,
       page,
@@ -122,6 +332,132 @@ exports.getMessages = asyncHandler(async (req, res) => {
     },
   });
 });
+
+/**
+ * @desc Get AI service health status
+ * @route GET /api/chat/ai/health
+ */
+exports.getAIHealth = asyncHandler(async (req, res) => {
+  try {
+    const healthStatus = await AIService.healthCheck();
+    res.json(healthStatus);
+  } catch (error) {
+    Logger.error('AI health check failed:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Failed to check AI service health',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @desc Generate streaming AI response for real-time chat
+ * @route POST /api/chat/ai/stream
+ */
+exports.streamAIResponse = asyncHandler(async (req, res) => {
+  const { content, type = 'question', conversationId } = req.body;
+
+  if (!content) {
+    res.status(400);
+    throw new Error('Content is required for AI response');
+  }
+
+  // Get conversation history for context
+  const userHistory = conversationId 
+    ? await ChatMessage.find({ conversationId }).sort({ createdAt: -1 }).limit(10)
+    : [];
+
+  try {
+    // Set headers for streaming
+    res.setHeader('Content-Type', 'text/plain');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const stream = await AIService.generateStreamingResponse(content, type, userHistory);
+    
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content || '';
+      if (content) {
+        res.write(content);
+      }
+    }
+    
+    res.end();
+  } catch (error) {
+    Logger.error('Streaming AI response failed:', error);
+    res.status(500).json({
+      error: 'Failed to generate AI response',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * @desc Enhanced AI insights with fallback status
+ * @route GET /api/chat/ai/insights/:conversationId
+ */
+exports.getAIInsights = asyncHandler(async (req, res) => {
+  const { conversationId } = req.params;
+  
+  const messages = await ChatMessage.find({ conversationId })
+    .sort({ createdAt: 1 });
+
+  if (messages.length === 0) {
+    res.status(404);
+    throw new Error('Conversation not found');
+  }
+
+  // Aggregate AI insights
+  const insights = {
+    totalMessages: messages.length,
+    messageTypes: {},
+    priorities: {},
+    sentimentTrend: [],
+    commonTags: {},
+    issuePatterns: {},
+    languageDistribution: {},
+    aiResponseCount: messages.filter(m => m.aiMetadata?.isAiGenerated).length,
+    // Add fallback service status
+    serviceStatus: await AIService.healthCheck()
+  };
+
+  messages.forEach(message => {
+    if (message.aiMetadata) {
+      // Count message types
+      insights.messageTypes[message.type] = (insights.messageTypes[message.type] || 0) + 1;
+      
+      // Count priorities
+      insights.priorities[message.priority] = (insights.priorities[message.priority] || 0) + 1;
+      
+      // Aggregate tags
+      if (message.aiMetadata.extractedTags) {
+        message.aiMetadata.extractedTags.forEach(tag => {
+          insights.commonTags[tag] = (insights.commonTags[tag] || 0) + 1;
+        });
+      }
+      
+      // Track issue patterns
+      if (message.aiMetadata.issuePattern) {
+        insights.issuePatterns[message.aiMetadata.issuePattern] = 
+          (insights.issuePatterns[message.aiMetadata.issuePattern] || 0) + 1;
+      }
+      
+      // Language distribution
+      if (message.aiMetadata.detectedLanguage) {
+        insights.languageDistribution[message.aiMetadata.detectedLanguage] = 
+          (insights.languageDistribution[message.aiMetadata.detectedLanguage] || 0) + 1;
+      }
+    }
+  });
+
+  res.json({
+    success: true,
+    conversationId,
+    insights
+  });
+});
+
 
 /**
  * @desc Mark messages as read
